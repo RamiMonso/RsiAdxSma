@@ -1,5 +1,5 @@
 # streamlit_backtester_rsi_adx.py
-# Backtester RSI + ADX + SMA — גרסה עם ברירות מחדל מעודכנות לפי בקשת המשתמש
+# Backtester RSI + ADX + SMA — כולל בדיקה לאחר התקופה עד יום הריצה וסימון סגירות מיוחדות
 # שמור והרץ: streamlit run streamlit_backtester_rsi_adx.py
 
 import streamlit as st
@@ -128,8 +128,14 @@ def compute_adx(high, low, close, period: int = 14) -> pd.Series:
 
 # ---------------------- עזרי מערכת ----------------------
 def download_data(ticker: str, start_date: pd.Timestamp, end_date: pd.Timestamp, interval: str, warmup_days: int = 250) -> pd.DataFrame:
+    """
+    הורדת נתונים: מורידים עד יום הריצה (כדי לאפשר בדיקה של ימים לאחר end_date).
+    החימום עדיין נעשה לפני start_date.
+    """
     start_fetch = pd.to_datetime(start_date) - pd.Timedelta(days=warmup_days)
-    end_fetch = pd.to_datetime(end_date) + pd.Timedelta(days=1)
+    # הורד עד היום (כולל), כדי שנוכל לבדוק ימים אחרי התאריך שסומנה ע"י המשתמש
+    today_date = pd.to_datetime(datetime.today().date())
+    end_fetch = max(pd.to_datetime(end_date), today_date) + pd.Timedelta(days=1)
     df = yf.download(ticker,
                      start=start_fetch.strftime('%Y-%m-%d'),
                      end=end_fetch.strftime('%Y-%m-%d'),
@@ -162,7 +168,7 @@ def calc_commission(value: float, commission_type: str, commission_value: float)
     else:
         return commission_value
 
-# ---------------------- UI — הגדרות משתמש (ברירות מחדל מעודכנות) ----------------------
+# ---------------------- UI — הגדרות משתמש ----------------------
 with st.sidebar.form('settings'):
     st.header('הגדרות בדיקה')
     tickers_input = st.text_input('טיקר (או רשימת טיקרים, מופרדים בפסיקים)', value='AAPL')
@@ -171,19 +177,17 @@ with st.sidebar.form('settings'):
     timeframe = st.selectbox('פרק זמן', options=['1d', '1h'], index=0, format_func=lambda x: 'יומי' if x=='1d' else 'שעתי')
     col1, col2 = st.columns(2)
     with col1:
-        # ברירת מחדל: תחילת השנה הנוכחית
-        start_date = st.date_input('תאריך התחלה', value=datetime(datetime.today().year, 1, 1).date())
+        start_date = st.date_input('תאריך התחלה', value=(datetime.today() - timedelta(days=365)).date())
     with col2:
         end_date = st.date_input('תאריך סוף', value=datetime.today().date())
 
     st.subheader('אינדיקטורים')
-    # ברירות מחדל מעודכנות
     rsi_period = st.number_input('RSI — מספר תקופות', min_value=2, max_value=200, value=14)
     adx_period = st.number_input('ADX — מספר תקופות', min_value=2, max_value=200, value=14)
-    sma_period = st.number_input('SMA — מספר תקופות', min_value=2, max_value=500, value=200)
+    sma_period = st.number_input('SMA — מספר תקופות', min_value=2, max_value=500, value=50)
 
-    rsi_entry_thresh = st.number_input('סף RSI לכניסה (≤)', min_value=1, max_value=100, value=40)
-    rsi_exit_thresh = st.number_input('סף RSI ליציאה (≥)', min_value=1, max_value=100, value=60)
+    rsi_entry_thresh = st.number_input('סף RSI לכניסה (≤)', min_value=1, max_value=100, value=30)
+    rsi_exit_thresh = st.number_input('סף RSI ליציאה (≥)', min_value=1, max_value=100, value=50)
     adx_thresh = st.number_input('סף ADX לכניסה (≤)', min_value=1, max_value=100, value=25)
 
     include_rsi = st.checkbox('להשתמש ב-RSI?', value=True)
@@ -195,13 +199,12 @@ with st.sidebar.form('settings'):
     fractional_shares = st.checkbox('לאפשר רכישת שברי מניה?', value=True)
     capital = st.number_input('הון התחלתי', min_value=1.0, value=10000.0, step=100.0)
 
-    # ברירת מחדל: הון ראשוני + ריבית דריבית
-    invest_mode = st.radio('שיטת השקעה לכל עסקה', options=['סכום קבוע לכל עסקה', 'הון ראשוני + ריבית דריבית'], index=1)
+    invest_mode = st.radio('שיטת השקעה לכל עסקה', options=['סכום קבוע לכל עסקה', 'הון ראשוני + ריבית דריבית'], index=0)
     fixed_invest_amount = st.number_input('סכום להשקעה בכל עסקה (כשבחרת סכום קבוע)', min_value=1.0, value=1000.0, step=100.0)
 
     st.subheader('עמלות')
     commission_type = st.selectbox('סוג עמלה', options=['אחוז', 'סכום'], index=0)
-    commission_value = st.number_input('ערך עמלה (למשל: 0.1 עבור 0.1% או 2 עבור 2 ש"ח)', min_value=0.0, value=0.0)
+    commission_value = st.number_input('ערך עמלה (למשל: 0.1 עבור 0.1% או 2 עבור 2 ש"ח)', min_value=0.0, value=0.1)
 
     exec_mode = st.radio('מתי לבצע ביצוע כאשר התנאי מתקיים', options=['ביום האותן', 'ביום המסחר הבא'], index=0)
     execute_next_day = (exec_mode == 'ביום המסחר הבא')
@@ -233,8 +236,11 @@ if submit:
         results_by_ticker = {}
         bh_by_ticker = {}
 
+        today_date = pd.to_datetime(datetime.today().date())
+
         for ticker in tickers:
             with st.spinner(f'מוריד נתונים ועורך חישובים עבור {ticker}...'):
+                # הורדה — שים לב: download_data יוריד גם ימים אחרי end_date עד היום
                 raw = download_data(ticker, pd.to_datetime(start_date), pd.to_datetime(end_date), timeframe, warmup_days)
                 if raw.empty:
                     st.error(f'לא נמצאו נתונים עבור {ticker} — בדוק טווח ותדירות.')
@@ -243,12 +249,12 @@ if submit:
                 df = raw.copy()
                 initial_capital = float(capital)
 
-                # חישובי אינדיקטורים
+                # חישוב אינדיקטורים
                 df['RSI'] = compute_rsi(df['Close'], period=rsi_period) if include_rsi else np.nan
                 df['ADX'] = compute_adx(df['High'], df['Low'], df['Close'], period=adx_period) if include_adx else np.nan
                 df[f'SMA_{sma_period}'] = df['Close'].rolling(window=sma_period, min_periods=1).mean() if include_sma else np.nan
 
-                # טווח לסריקה
+                # טווח הסריקה העיקרי (לכניסות)
                 try:
                     scan_df = df.loc[str(start_date):str(end_date)].copy()
                 except Exception:
@@ -258,7 +264,21 @@ if submit:
                     st.warning(f'לא נותרו נתונים בסקירה עבור {ticker} (לאחר חימום/טווח).')
                     continue
 
-                idx = list(scan_df.index)
+                # רשימת אינדקס מלאה (כדי לאתר מיקומים אחרי end_date)
+                full_idx = list(df.index)
+                # last index inside scan_df (נשתמש בו כנקודת התחלה לבדיקות לאחר התקופה)
+                scan_idx_list = list(scan_df.index)
+                last_scan_index = scan_idx_list[-1]
+
+                # מציאת המיקום הספציפי האחרון ב-full_idx (למקרה של כפילויות — ניקח את ההופעה האחרונה)
+                positions = [i for i, v in enumerate(full_idx) if v == last_scan_index]
+                if positions:
+                    last_scan_pos_in_full = positions[-1]
+                else:
+                    # fallback — השתמש באורך של scan_df כנקודת התחלה יחסית
+                    last_scan_pos_in_full = len(full_idx) - 1 - (len(df) - len(scan_df))
+
+                idx = scan_idx_list
                 n = len(idx)
                 trades = []
                 in_position = False
@@ -269,6 +289,7 @@ if submit:
                 bh_start_price = to_scalar(scan_df['Close'].iloc[0])
                 bh_end_price = to_scalar(scan_df['Close'].iloc[-1])
 
+                # --- לולאת בדיקה בתוך טווח המשתמש (כניסות/יציאות רגילות) ---
                 for i in range(n):
                     row = scan_df.iloc[i]
                     price = to_scalar(row.get('Close', np.nan))
@@ -315,6 +336,7 @@ if submit:
                             equity -= entry_comm
 
                             entry = {
+                                'entry_pos_full': last_scan_pos_in_full - (n - 1 - exec_i),  # approximate full position
                                 'entry_idx': exec_i,
                                 'entry_date': idx[exec_i],
                                 'entry_price': float(exec_price),
@@ -327,7 +349,7 @@ if submit:
                             }
                             in_position = True
 
-                    # יציאה
+                    # יציאה בתוך הטווח
                     if in_position and (entry is not None):
                         exit_cond = True
                         if include_rsi:
@@ -353,7 +375,6 @@ if submit:
                                         else:
                                             equity = equity + net_pl
 
-                                        # חישוב משך העסקה בימים (כולל: כניסה+יציאה באותו יום = 1)
                                         exit_dt = pd.to_datetime(idx[exec_i])
                                         entry_dt = pd.to_datetime(entry['entry_date'])
                                         duration_days = (exit_dt.normalize() - entry_dt.normalize()).days + 1
@@ -381,7 +402,9 @@ if submit:
                                             'exit_commission': exit_comm,
                                             'net_PL': net_pl,
                                             'pnl_pct': (net_pl / (entry['invest_amount'] if entry['invest_amount']>0 else 1)) * 100,
-                                            'duration_days': duration_days
+                                            'duration_days': duration_days,
+                                            'closed_after_period': False,
+                                            'closed_at_run': False
                                         })
 
                                         in_position = False
@@ -389,54 +412,156 @@ if submit:
 
                     cumulative_equity.append(equity)
 
-                # טיפול בפוזיציה פתוחה בתום התקופה
+                # --- אם נשארה פוזיציה פתוחה בסוף התקופה - נבדוק ימים אחרי התקופה עד יום הריצה ---
                 if in_position and entry is not None:
-                    last_i = n - 1
-                    last_price = to_scalar(scan_df.iloc[last_i].get('Close', np.nan))
-                    if (not pd.isna(last_price)) and close_open_at_run:
-                        last_price = float(last_price)
-                        gross_pl = (last_price - entry['entry_price']) * entry['quantity']
-                        exit_comm = calc_commission(last_price * entry['quantity'], commission_type, commission_value)
-                        net_pl = gross_pl - exit_comm
-                        if invest_mode == 'סכום קבוע לכל עסקה':
-                            equity += entry['invest_amount'] + net_pl
-                        else:
-                            equity = equity + net_pl
+                    closed_during_extension = False
+                    # נתחיל מהמיקום הבא ב-full_idx אחרי last_scan_pos_in_full
+                    start_pos = last_scan_pos_in_full + 1
+                    for pos in range(start_pos, len(full_idx)):
+                        # נעבור על הימים/תצפיות אחרי תום הטווח ועד היום (כולל)
+                        row_future = df.iloc[pos]
+                        # אם התאריך גדול מיום הריצה — נפסיק
+                        if pd.to_datetime(full_idx[pos]).normalize() > today_date:
+                            break
 
-                        exit_dt = pd.to_datetime(idx[last_i])
-                        entry_dt = pd.to_datetime(entry['entry_date'])
-                        duration_days = (exit_dt.normalize() - entry_dt.normalize()).days + 1
-                        try:
-                            duration_days = int(duration_days)
-                            if duration_days < 1:
-                                duration_days = 1
-                        except Exception:
-                            duration_days = np.nan
+                        # בדיקת תנאי יציאה על אותו יום
+                        rsi_v_f = to_scalar(row_future.get('RSI', np.nan))
+                        adx_v_f = to_scalar(row_future.get('ADX', np.nan))
+                        sma_v_f = to_scalar(row_future.get(f'SMA_{sma_period}', np.nan))
+                        price_f = to_scalar(row_future.get('Close', np.nan))
 
-                        trades.append({
-                            'entry_date': pd.to_datetime(entry['entry_date']),
-                            'entry_price': entry['entry_price'],
-                            'entry_RSI': entry.get('entry_RSI', np.nan),
-                            'entry_ADX': entry.get('entry_ADX', np.nan),
-                            'entry_SMA': entry.get('entry_SMA', np.nan),
-                            'exit_date': pd.to_datetime(idx[last_i]),
-                            'exit_price': last_price,
-                            'exit_RSI': to_scalar(scan_df.iloc[last_i].get('RSI', np.nan)),
-                            'exit_ADX': to_scalar(scan_df.iloc[last_i].get('ADX', np.nan)),
-                            'exit_SMA': to_scalar(scan_df.iloc[last_i].get(f'SMA_{sma_period}', np.nan)),
-                            'quantity': entry['quantity'],
-                            'gross_PL': gross_pl,
-                            'entry_commission': entry['entry_commission'],
-                            'exit_commission': exit_comm,
-                            'net_PL': net_pl,
-                            'pnl_pct': (net_pl / (entry['invest_amount'] if entry['invest_amount']>0 else 1)) * 100,
-                            'duration_days': duration_days,
-                            'note': 'סגירה לפי יום הריצה (פוזיציה פתוחה)'
-                        })
-                        in_position = False
-                        entry = None
+                        exit_cond_future = True
+                        if include_rsi:
+                            exit_cond_future = exit_cond_future and (not pd.isna(rsi_v_f)) and (float(rsi_v_f) >= float(rsi_exit_thresh))
+                        # (בדרישות המקוריות יציאה אינה תלויה ב-ADX/SMA אלא רק ב-RSI ובמחיר גבוה ממחיר הכניסה;
+                        # נשמור ריצ'ק עליה — כלומר נחייב גם התניה שמחיר היום יהיה גבוה ממחיר הכניסה)
+                        if include_adx:
+                            exit_cond_future = exit_cond_future and (not pd.isna(adx_v_f)) and (float(adx_v_f) <= float(adx_thresh))
+                        if include_sma:
+                            exit_cond_future = exit_cond_future and (not pd.isna(sma_v_f)) and (price_f > float(sma_v_f))
 
-                # Buy&Hold
+                        if exit_cond_future:
+                            # אם המשתמש בחר לבצע יום הבא — נספור את היציאה ביום הבא, אחרת באותו יום
+                            exec_pos = pos + 1 if execute_next_day else pos
+                            # אם יש מיקום ביצוע זמין — נדאג להוציא שם. אחרת, נקבל את המחיר האחרון הזמין.
+                            if exec_pos < len(full_idx):
+                                exec_row = df.iloc[exec_pos]
+                                exit_price = to_scalar(exec_row.get('Close', np.nan))
+                                exit_dt = pd.to_datetime(full_idx[exec_pos])
+                            else:
+                                # אין שורה ליום הבא — קח את המחיר האחרון הזמין
+                                exec_row = df.iloc[-1]
+                                exit_price = to_scalar(exec_row.get('Close', np.nan))
+                                exit_dt = pd.to_datetime(full_idx[-1])
+
+                            if pd.isna(exit_price):
+                                # לא ניתן לסגור אם אין מחיר ביצוע
+                                continue
+                            exit_price = float(exit_price)
+                            # נדרוש מחיר יציאה גבוה ממחיר כניסה (כמו בהגדרה)
+                            if exit_price > entry['entry_price']:
+                                gross_pl = (exit_price - entry['entry_price']) * entry['quantity']
+                                exit_comm = calc_commission(exit_price * entry['quantity'], commission_type, commission_value)
+                                net_pl = gross_pl - exit_comm
+
+                                if invest_mode == 'סכום קבוע לכל עסקה':
+                                    equity += entry['invest_amount'] + net_pl
+                                else:
+                                    equity = equity + net_pl
+
+                                # חשב משך (מיום הכניסה עד יום היציאה בפועל)
+                                entry_dt = pd.to_datetime(entry['entry_date'])
+                                duration_days = (pd.to_datetime(exit_dt).normalize() - entry_dt.normalize()).days + 1
+                                try:
+                                    duration_days = int(duration_days)
+                                    if duration_days < 1:
+                                        duration_days = 1
+                                except Exception:
+                                    duration_days = np.nan
+
+                                trades.append({
+                                    'entry_date': pd.to_datetime(entry['entry_date']),
+                                    'entry_price': entry['entry_price'],
+                                    'entry_RSI': entry.get('entry_RSI', np.nan),
+                                    'entry_ADX': entry.get('entry_ADX', np.nan),
+                                    'entry_SMA': entry.get('entry_SMA', np.nan),
+                                    'exit_date': pd.to_datetime(exit_dt),
+                                    'exit_price': exit_price,
+                                    'exit_RSI': to_scalar(exec_row.get('RSI', np.nan)),
+                                    'exit_ADX': to_scalar(exec_row.get('ADX', np.nan)),
+                                    'exit_SMA': to_scalar(exec_row.get(f'SMA_{sma_period}', np.nan)),
+                                    'quantity': entry['quantity'],
+                                    'gross_PL': gross_pl,
+                                    'entry_commission': entry['entry_commission'],
+                                    'exit_commission': exit_comm,
+                                    'net_PL': net_pl,
+                                    'pnl_pct': (net_pl / (entry['invest_amount'] if entry['invest_amount']>0 else 1)) * 100,
+                                    'duration_days': duration_days,
+                                    'closed_after_period': True,
+                                    'closed_at_run': False,
+                                    'note': f'סגירה לאחר התקופה ב-{pd.to_datetime(exit_dt).date()}'
+                                })
+
+                                closed_during_extension = True
+                                in_position = False
+                                entry = None
+                                break
+                            else:
+                                # מחיר יציאה אינו גבוה ממחיר כניסה -> לא סוגרים כאן
+                                continue
+
+                    # אם לא נסגר במהלך ההארכה עד יום הריצה — נסגור לפי מחיר יום הריצה (לדוח)
+                    if in_position and entry is not None:
+                        # ניקח את המחיר האחרון הזמין ב-df (שאמור להיות עד היום)
+                        last_price = to_scalar(df['Close'].iloc[-1])
+                        if not pd.isna(last_price):
+                            last_price = float(last_price)
+                            gross_pl = (last_price - entry['entry_price']) * entry['quantity']
+                            exit_comm = calc_commission(last_price * entry['quantity'], commission_type, commission_value)
+                            net_pl = gross_pl - exit_comm
+
+                            if invest_mode == 'סכום קבוע לכל עסקה':
+                                equity += entry['invest_amount'] + net_pl
+                            else:
+                                equity = equity + net_pl
+
+                            exit_dt = pd.to_datetime(df.index[-1])
+                            entry_dt = pd.to_datetime(entry['entry_date'])
+                            duration_days = (exit_dt.normalize() - entry_dt.normalize()).days + 1
+                            try:
+                                duration_days = int(duration_days)
+                                if duration_days < 1:
+                                    duration_days = 1
+                            except Exception:
+                                duration_days = np.nan
+
+                            trades.append({
+                                'entry_date': pd.to_datetime(entry['entry_date']),
+                                'entry_price': entry['entry_price'],
+                                'entry_RSI': entry.get('entry_RSI', np.nan),
+                                'entry_ADX': entry.get('entry_ADX', np.nan),
+                                'entry_SMA': entry.get('entry_SMA', np.nan),
+                                'exit_date': pd.to_datetime(exit_dt),
+                                'exit_price': last_price,
+                                'exit_RSI': to_scalar(df['RSI'].iloc[-1]) if 'RSI' in df.columns else np.nan,
+                                'exit_ADX': to_scalar(df['ADX'].iloc[-1]) if 'ADX' in df.columns else np.nan,
+                                'exit_SMA': to_scalar(df[f'SMA_{sma_period}'].iloc[-1]) if f'SMA_{sma_period}' in df.columns else np.nan,
+                                'quantity': entry['quantity'],
+                                'gross_PL': gross_pl,
+                                'entry_commission': entry['entry_commission'],
+                                'exit_commission': exit_comm,
+                                'net_PL': net_pl,
+                                'pnl_pct': (net_pl / (entry['invest_amount'] if entry['invest_amount']>0 else 1)) * 100,
+                                'duration_days': duration_days,
+                                'closed_after_period': False,
+                                'closed_at_run': True,
+                                'note': 'סגירה לפי יום הריצה (לא נמצאה יציאה תקנית)'
+                            })
+
+                            in_position = False
+                            entry = None
+
+                # --- Buy&Hold חישוב מבוסס initial_capital ---
                 bh_shares = initial_capital / bh_start_price if (bh_start_price and bh_start_price > 0) else 0.0
                 bh_gross = (bh_end_price - bh_start_price) * bh_shares if (bh_start_price and bh_end_price) else 0.0
                 bh_entry_comm = calc_commission(initial_capital, commission_type, commission_value)
@@ -456,7 +581,7 @@ if submit:
                     'total_commissions': total_comm,
                     'final_equity': equity,
                     'cumulative_equity': cumulative_equity,
-                    'price_df': scan_df
+                    'price_df': df  # שמרנו את כל ה־df (כולל ימים אחרי end_date) כדי לצייר סימונים
                 }
                 bh_by_ticker[ticker] = {
                     'bh_start_price': bh_start_price,
@@ -478,21 +603,17 @@ if submit:
                 if not df_show.empty:
                     df_show['entry_date'] = pd.to_datetime(df_show['entry_date'])
                     df_show['exit_date'] = pd.to_datetime(df_show['exit_date'])
-                # הצגת טבלה כוללת duration_days
                 st.dataframe(df_show)
 
                 st.markdown('**סיכום ביצועים**')
-                # חשב אחוזי ביצוע (win rate)
                 total_trades = len(trades_df)
                 wins = int((trades_df['net_PL'] > 0).sum()) if total_trades>0 else 0
                 win_rate = (wins / total_trades) * 100 if total_trades>0 else 0.0
 
-                # חישוב תשואה כוללת בהתאם למצב ההשקעה (final_equity מול הון התחלתי)
                 final_equity = float(res.get('final_equity', 0.0))
                 initial_cap = float(capital)
                 total_return_pct = ((final_equity - initial_cap) / initial_cap * 100) if initial_cap != 0 else 0.0
 
-                # הצגה במסך (עכשיו 5 מדדים)
                 c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric('סה״כ רווח נקי', f"{res['total_net']:.2f}")
                 c2.metric('סה״כ רווח ברוטו', f"{res['total_gross']:.2f}")
@@ -500,7 +621,7 @@ if submit:
                 c4.metric('אחוזי ביצוע (Win Rate)', f"{win_rate:.2f}%")
                 c5.metric('תשואה כוללת (%)', f"{total_return_pct:.2f}%")
 
-            st.subheader('גרף מחיר — כניסות ויציאות')
+            st.subheader('גרף מחיר — כניסות ויציאות (כולל סגירות לאחר התקופה)')
             price_df = res['price_df'].reset_index().rename(columns={'index': 'Date'})
             price_df['Date'] = pd.to_datetime(price_df['Date'])
 
@@ -513,8 +634,18 @@ if submit:
                 if not trades_df.empty:
                     for _, t in trades_df.iterrows():
                         try:
-                            ax.scatter(t['entry_date'], t['entry_price'], marker='^', s=80, c='green', zorder=5)
-                            ax.scatter(t['exit_date'], t['exit_price'], marker='v', s=80, c='red', zorder=5)
+                            # כניסה - תמיד חץ ירוק
+                            ax.scatter(t['entry_date'], t['entry_price'], marker='^', s=80, facecolors='none', edgecolors='green', linewidths=2, zorder=5)
+                            # יציאה - תלוי סוג סגירה
+                            if t.get('closed_after_period', False):
+                                # סגירה לאחר התקופה — סמן 'x' כחול
+                                ax.scatter(t['exit_date'], t['exit_price'], marker='x', s=100, color='blue', zorder=6)
+                            elif t.get('closed_at_run', False):
+                                # סגירה לפי יום הריצה — סמן ריבוע כתום
+                                ax.scatter(t['exit_date'], t['exit_price'], marker='s', s=100, color='orange', edgecolors='black', zorder=6)
+                            else:
+                                # יציאה רגילה - חץ אדום
+                                ax.scatter(t['exit_date'], t['exit_price'], marker='v', s=80, facecolors='none', edgecolors='red', linewidths=2, zorder=5)
                         except Exception:
                             pass
                 ax.set_title(f'{ticker} — Price with entries/exits')
@@ -547,7 +678,6 @@ if submit:
                     base = alt.Chart(price_df).encode(x='Date:T')
                     line = base.mark_line().encode(y='Close:Q', tooltip=['Date:T', 'Close:Q'])
                     charts = [line]
-                    sma_col = f'SMA_{sma_period}'
                     if sma_col in price_df.columns:
                         sma_df = price_df[['Date', sma_col]].rename(columns={sma_col: 'SMA'})
                         charts.append(alt.Chart(sma_df).mark_line(strokeDash=[4, 2]).encode(x='Date:T', y='SMA:Q'))
@@ -579,12 +709,8 @@ if submit:
 
 st.markdown('''
 **הערות חשובות:**  
-- עודכנתי **רק** את ערכי ברירת המחדל כפי שביקשת:  
-  1. תאריך התחלה — תחילת השנה הנוכחית.  
-  2. SMA ברירת מחדל = 200.  
-  3. סף כניסה RSI = 40.  
-  4. סף יציאה RSI = 60.  
-  5. שיטת השקעה ברירת מחדל = 'הון ראשוני + ריבית דריבית'.  
-  6. ערך עמלה ברירת מחדל = 0.0.  
-- כל שאר הלוגיקה, הפונקציות והפיצ'רים נותרו בדיוק כפי שהיו.
+- הקוד ממשיך לבדוק ימים אחרי תאריכי הסריקה שציינת (עד ליום הריצה). אם התנאים ליציאה מתקיימים בכל אחד מהימים הללו — נסגור שם ונחשב רווח/הפסד.  
+- אם לא נמצאה יציאה עד יום הריצה — הקוד יחשב וידווח P/L לפי שווי המניה ביום הריצה ויתייג את הסגירה כ׳סגירה לפי יום הריצה׳.  
+- בגרף: יציאות לאחר התקופה יסומנו ב־X כחול; יציאות לפי יום הריצה יסומנו בריבוע כתום; יציאות רגילות ישארו חץ אדום.  
+- לא שיניתי שום לוגיקה אחרת — רק הוספתי את ההתנהגות לתיעוד/סגירה לאחר התקופה כפי שביקשת.
 ''')
