@@ -203,127 +203,66 @@ def add_indicators(df, params):
 
 def single_run_backtest(df, params):
     df = add_indicators(df, params)
+
+    # נוודא שאין NaN באינדיקטורים לפני חישוב תנאים
+    df = df.dropna(subset=['RSI', 'ADX', 'SMA'])
+
+    # שליפת פרמטרים
+    rsi_entry = params.get('rsi_entry', 30)
+    rsi_exit = params.get('rsi_exit', 70)
+    adx_thresh = params.get('adx_thresh', 20)
+    sma_period = params.get('sma_period', 20)
+
     trades = []
-    position = None
+    in_position = False
+    entry_price = None
+    entry_date = None
 
-    # Core thresholds
-    rsi_entry = float(params.get('rsi_entry', 30.0))
-    rsi_exit = float(params.get('rsi_exit', 60.0))
-    adx_thresh = float(params.get('adx_threshold', 25.0))
-    use_ma = params.get('use_ma', True)
-    price_ma_field = 'SMA' if params.get('ma_type','SMA')=='SMA' else 'EMA'
+    for i in range(len(df)):
+        row = df.iloc[i]
+        rsi_val = row['RSI']
+        adx_val = row['ADX']
+        sma_val = row['SMA']
+        close_price = row['Close']
+        date = row.name
 
-    # Additional indicator participation settings
-    macd_part = params.get('macd_part', [])
-    stoch_part = params.get('stoch_part', [])
-    atr_part = params.get('atr_part', [])
+        # נוודא שכולם מספרים ולא Series
+        if pd.isna(rsi_val) or pd.isna(adx_val) or pd.isna(sma_val):
+            continue
 
-    stoch_entry_thr = float(params.get('stoch_entry_thr', 20.0))
-    stoch_exit_thr = float(params.get('stoch_exit_thr', 80.0))
-    atr_entry_max = float(params.get('atr_entry_max', 999999.0))
-    atr_exit_min = float(params.get('atr_exit_min', -1.0))
+        # תנאי כניסה
+        if (not in_position) and (rsi_val < rsi_entry) and (adx_val > adx_thresh) and (close_price > sma_val):
+            in_position = True
+            entry_price = close_price
+            entry_date = date
 
-    for date, row in df.iterrows():
-        close = row['Close']
-        rsi_val = row.get('RSI', np.nan)
-        adx_val = row.get('ADX', np.nan)
-        ma_val = row.get(price_ma_field, np.nan)
-        macd_val = row.get('MACD', np.nan)
-        macd_sig = row.get('MACD_SIGNAL', np.nan)
-        stoch_k = row.get('STOCH_K', np.nan)
-        atr = row.get('ATR', np.nan)
-
-        if position is None:
-            conds = []
-            conds.append((not np.isnan(rsi_val)) and (rsi_val < rsi_entry))
-            conds.append((not np.isnan(adx_val)) and (adx_val < adx_thresh))
-            if use_ma:
-                conds.append((not np.isnan(ma_val)) and (close > ma_val))
-
-            if 'Entry' in macd_part:
-                conds.append((not np.isnan(macd_val)) and (not np.isnan(macd_sig)) and (macd_val > macd_sig))
-
-            if 'Entry' in stoch_part:
-                conds.append((not np.isnan(stoch_k)) and (stoch_k < stoch_entry_thr))
-
-            if 'Entry' in atr_part:
-                conds.append((not np.isnan(atr)) and (atr < atr_entry_max))
-
-            if all(conds):
-                position = {
-                    'entry_date': date,
-                    'entry_price': close,
-                    'entry_rsi': rsi_val,
-                    'entry_adx': adx_val,
-                    'entry_ma': ma_val,
-                    'entry_macd': macd_val,
-                    'entry_macd_sig': macd_sig,
-                    'entry_stoch': stoch_k,
-                    'entry_atr': atr
-                }
-        else:
-            exit_conds = []
-            exit_conds.append((not np.isnan(rsi_val)) and (rsi_val > rsi_exit))
-            exit_conds.append(close > position['entry_price'])
-
-            if 'Exit' in macd_part:
-                exit_conds.append((not np.isnan(macd_val)) and (not np.isnan(macd_sig)) and (macd_val < macd_sig))
-
-            if 'Exit' in stoch_part:
-                exit_conds.append((not np.isnan(stoch_k)) and (stoch_k > stoch_exit_thr))
-
-            if 'Exit' in atr_part:
-                exit_conds.append((not np.isnan(atr)) and (atr > atr_exit_min))
-
-            if all(exit_conds):
-                exit_trade = {
-                    'entry_date': position['entry_date'],
-                    'entry_price': position['entry_price'],
-                    'entry_rsi': position['entry_rsi'],
-                    'entry_adx': position['entry_adx'],
-                    'entry_ma': position['entry_ma'],
-                    'exit_date': date,
-                    'exit_price': close,
-                    'exit_rsi': rsi_val,
-                    'exit_adx': adx_val,
-                    'exit_ma': ma_val,
-                    'exit_macd': macd_val,
-                    'exit_macd_sig': macd_sig,
-                    'exit_stoch': stoch_k,
-                    'exit_atr': atr
-                }
-                raw_pct = (exit_trade['exit_price'] / exit_trade['entry_price'] - 1) * 100
-                exit_trade['raw_pct'] = raw_pct
-                trades.append(exit_trade)
-                position = None
-
-    if position is not None and params.get('close_open_on_run', False):
-        last = df.iloc[-1]
-        date = df.index[-1]
-        exit_trade = {
-            'entry_date': position['entry_date'],
-            'entry_price': position['entry_price'],
-            'entry_rsi': position['entry_rsi'],
-            'entry_adx': position['entry_adx'],
-            'entry_ma': position['entry_ma'],
-            'exit_date': date,
-            'exit_price': last['Close'],
-            'exit_rsi': last.get('RSI', np.nan),
-            'exit_adx': last.get('ADX', np.nan),
-            'exit_ma': last.get('SMA' if params.get('ma_type','SMA')=='SMA' else 'EMA', np.nan),
-            'exit_macd': last.get('MACD', np.nan),
-            'exit_macd_sig': last.get('MACD_SIGNAL', np.nan),
-            'exit_stoch': last.get('STOCH_K', np.nan),
-            'exit_atr': last.get('ATR', np.nan)
-        }
-        raw_pct = (exit_trade['exit_price'] / exit_trade['entry_price'] - 1) * 100
-        exit_trade['raw_pct'] = raw_pct
-        trades.append(exit_trade)
+        # תנאי יציאה
+        elif in_position and (rsi_val > rsi_exit or close_price < sma_val):
+            exit_price = close_price
+            exit_date = date
+            profit = (exit_price - entry_price) / entry_price * 100
+            trades.append({
+                'Entry Date': entry_date,
+                'Exit Date': exit_date,
+                'Entry Price': entry_price,
+                'Exit Price': exit_price,
+                'Profit %': profit
+            })
+            in_position = False
 
     trades_df = pd.DataFrame(trades)
-    if trades_df.empty:
-        summary = {'n_trades':0,'compounded_return_pct':0.0,'avg_trade_pct':0.0,'win_rate':0.0}
-        return trades_df, summary
+    summary = {}
+
+    if not trades_df.empty:
+        summary = {
+            'Total Trades': len(trades_df),
+            'Win Rate %': (trades_df['Profit %'] > 0).mean() * 100,
+            'Avg Profit %': trades_df['Profit %'].mean(),
+            'Total Return %': trades_df['Profit %'].sum()
+        }
+
+    return trades_df, summary
+
 
     fee_type = params.get('fee_type','none')
     fee_value = float(params.get('fee_value',0))
