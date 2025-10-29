@@ -24,11 +24,30 @@ st.set_page_config(page_title="Indicator Backtester — Robust", layout="wide")
 # --------------------- Safe indicator helpers ---------------------
 
 def safe_to_series(s):
-    """Ensure input is a 1-D numeric pandas Series with proper index."""
-    ser = pd.Series(s) if not isinstance(s, pd.Series) else s.copy()
-    ser.index = ser.index  # preserve index
-    ser = pd.to_numeric(ser, errors='coerce')
-    return ser
+    """Ensure the input is a 1D pandas Series (even if df['Close'] is multi-column)."""
+    import pandas as pd
+    import numpy as np
+
+    if isinstance(s, pd.Series):
+        return s.copy()
+
+    if isinstance(s, pd.DataFrame):
+        # אם יש עמודה אחת – נחזיר אותה
+        if s.shape[1] == 1:
+            return s.iloc[:, 0].copy()
+        # אם יש עמודה בשם 'Close' או דומה – ניקח אותה
+        close_candidates = [c for c in s.columns if 'close' in str(c).lower()]
+        if close_candidates:
+            return s[close_candidates[0]].copy()
+        # אחרת ניקח את העמודה הראשונה
+        return s.iloc[:, 0].copy()
+
+    # אם זה מערך numpy – נהפוך לסדרה
+    if isinstance(s, (list, np.ndarray)):
+        return pd.Series(s)
+
+    raise ValueError(f"Unsupported data type for safe_to_series(): {type(s)}")
+
 
 
 def safe_rsi(close, window=14):
