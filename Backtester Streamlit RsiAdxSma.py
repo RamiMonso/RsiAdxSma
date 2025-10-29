@@ -204,14 +204,28 @@ def add_indicators(df, params):
 def single_run_backtest(df, params):
     df = add_indicators(df, params)
 
-    # נוודא שאין NaN באינדיקטורים לפני חישוב תנאים
-    df = df.dropna(subset=['RSI', 'ADX', 'SMA'])
+    # נבדוק אילו עמודות נוספו בפועל
+    expected_cols = ['RSI', 'ADX', 'SMA']
+    available_cols = [col for col in expected_cols if col in df.columns]
+
+    if not available_cols:
+        raise ValueError(f"לא נמצאו אינדיקטורים ב-DataFrame. העמודות הקיימות הן: {list(df.columns)}")
+
+    # ננקה רק עמודות שקיימות בפועל
+    df = df.dropna(subset=available_cols)
+
+    # נזהה שמות נכונים (רישיות שונות)
+    rsi_col = next((c for c in df.columns if c.lower().startswith('rsi')), None)
+    adx_col = next((c for c in df.columns if c.lower().startswith('adx')), None)
+    sma_col = next((c for c in df.columns if c.lower().startswith('sma')), None)
+
+    if not all([rsi_col, adx_col, sma_col]):
+        raise ValueError(f"שמות העמודות אינם תואמים: RSI={rsi_col}, ADX={adx_col}, SMA={sma_col}")
 
     # שליפת פרמטרים
     rsi_entry = params.get('rsi_entry', 30)
     rsi_exit = params.get('rsi_exit', 70)
     adx_thresh = params.get('adx_thresh', 20)
-    sma_period = params.get('sma_period', 20)
 
     trades = []
     in_position = False
@@ -220,13 +234,13 @@ def single_run_backtest(df, params):
 
     for i in range(len(df)):
         row = df.iloc[i]
-        rsi_val = row['RSI']
-        adx_val = row['ADX']
-        sma_val = row['SMA']
+        rsi_val = row[rsi_col]
+        adx_val = row[adx_col]
+        sma_val = row[sma_col]
         close_price = row['Close']
         date = row.name
 
-        # נוודא שכולם מספרים ולא Series
+        # דלג על NaN
         if pd.isna(rsi_val) or pd.isna(adx_val) or pd.isna(sma_val):
             continue
 
@@ -262,6 +276,7 @@ def single_run_backtest(df, params):
         }
 
     return trades_df, summary
+
 
 
     fee_type = params.get('fee_type','none')
