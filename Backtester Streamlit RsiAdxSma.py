@@ -21,6 +21,37 @@ from ta.volatility import AverageTrueRange
 
 st.set_page_config(page_title="Indicator Backtester — Robust", layout="wide")
 
+import pandas as pd
+import numpy as np
+import ta  # אם לא התקנת: pip install ta
+
+# ----------------------------
+# פונקציה להוספת אינדיקטורים
+# ----------------------------
+def add_indicators(df, rsi_period=14, adx_period=14, sma_period=20):
+    if not all(col in df.columns for col in ['Close', 'High', 'Low']):
+        raise ValueError("DataFrame חייב לכלול עמודות 'Close', 'High' ו-'Low'")
+
+    df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=rsi_period).rsi()
+    df['ADX'] = ta.trend.ADXIndicator(df['High'], df['Low'], df['Close'], window=adx_period).adx()
+    df['SMA'] = ta.trend.SMAIndicator(df['Close'], window=sma_period).sma_indicator()
+    return df
+
+# ----------------------------
+# שלב 1: טען נתונים
+# ----------------------------
+df = pd.read_csv("your_data.csv")  # טען את הנתונים שלך כאן
+
+# ----------------------------
+# שלב 2: הוסף אינדיקטורים
+# ----------------------------
+df = add_indicators(df)  # עכשיו יש עמודות RSI, ADX ו-SMA
+
+# ----------------------------
+# שלב 3: רוץ את הבק־טסט
+# ----------------------------
+trades_df, summary = single_run_backtest(df, params)
+
 # --------------------- Safe indicator helpers ---------------------
 
 def safe_to_series(s):
