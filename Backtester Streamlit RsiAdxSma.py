@@ -1,743 +1,474 @@
-# backtester_streamlit.py
-# Streamlit backtester with robust indicator computation and fixed backtest logic
-# Dependencies: pip install streamlit yfinance pandas numpy plotly ta
+# streamlit_backtester_rsi_adx.py
+# אפליקציית Streamlit לבחינת אסטרטגיות כניסה/יציאה על בסיס RSI, ADX ו-SMA
+# שפת ממשק: עברית
+# הנחיות: שמור כקובץ app.py או streamlit_backtester_rsi_adx.py והרץ: `streamlit run streamlit_backtester_rsi_adx.py`
 
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
-from datetime import datetime
-import plotly.graph_objects as go
-from itertools import product
+import pandas_ta as ta
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from io import BytesIO
+from datetime import datetime, timedelta
 
-# TA indicators (used when available)
-try:
-    from ta.momentum import RSIIndicator, StochasticOscillator
-    from ta.trend import ADXIndicator, EMAIndicator, MACD
-    from ta.volatility import AverageTrueRange
-except Exception:
-    # If 'ta' not installed, code will use fallback implementations in safe_* functions.
-    RSIIndicator = None
-    StochasticOscillator = None
-    ADXIndicator = None
-    EMAIndicator = None
-    MACD = None
-    AverageTrueRange = None
+st.set_page_config(page_title='Backtester RSI+ADX+SMA', layout='wide')
 
-st.set_page_config(page_title="Indicator Backtester — Robust", layout="wide")
+# ---------- עיצוב כותרת ----------
+st.title('Backtester — בדיקת אסטרטגיות RSI + ADX + SMA')
+st.caption('נתוני Adjusted Close מ-Yahoo Finance | חימום אינדיקטורים: 250 ימי מסחר')
 
+# ---------- סיידבר: הגדרות משתמש ----------
+with st.sidebar.form('settings'):
+    st.header('הגדרות סקריפט')
 
-# --------------------- Helpers ---------------------
+    tickers_input = st.text_input('הזן טיקר או רשימת טיקרים (מופרדים בפסיקים)', value='AAPL')
+    tickers = [t.strip().upper() for t in tickers_input.split(',') if t.strip()]
 
-def _flatten_columns(df):
-    """Flatten MultiIndex columns to single strings and return a copy of df."""
-    cols = []
-    for c in df.columns:
-        if isinstance(c, tuple):
-            cols.append('_'.join([str(x) for x in c if x is not None and str(x) != '']))
-        else:
-            cols.append(str(c))
-    df2 = df.copy()
-    df2.columns = cols
-    return df2
+    timeframe = st.selectbox('בחירת פרק זמן', options=['1d', '1h'], index=0, format_func=lambda x: 'יומי' if x=='1d' else 'שעתי')
 
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input('תאריך התחלה', value=(datetime.today() - timedelta(days=365)).date())
+    with col2:
+        end_date = st.date_input('תאריך סוף', value=datetime.today().date())
 
-def safe_to_series(s):
-    """Ensure the input is a 1D pandas Series (robust to DataFrames with various close column names)."""
-    import pandas as pd
-    import numpy as np
+    # אינדיקטורים
+    st.subheader('הגדרות אינדיקטורים')
+    rsi_period = st.number_input('RSI — מספר ימים', min_value=2, max_value=200, value=14)
+    adx_period = st.number_input('ADX — מספר ימים', min_value=2, max_value=200, value=14)
+    sma_period = st.number_input('SMA — מספר ימים', min_value=2, max_value=500, value=50)
 
-    if isinstance(s, pd.Series):
-        return s.copy()
+    rsi_entry_thresh = st.number_input('סף RSI לכניסה (≤)', min_value=1, max_value=100, value=30)
+    rsi_exit_thresh = st.number_input('סף RSI ליציאה (≥)', min_value=1, max_value=100, value=50)
+    adx_thresh = st.number_input('סף ADX לכניסה (≤)', min_value=1, max_value=100, value=25)
 
-    if isinstance(s, pd.DataFrame):
-        df = _flatten_columns(s)
-        # prefer exact 'Close' then 'Adj Close' then any column containing 'close'
-        candidates = [c for c in df.columns if c.lower() == 'close']
-        if not candidates:
-            candidates = [c for c in df.columns if c.lower() == 'adj close' or 'adjclose' in c.lower()]
-        if not candidates:
-            candidates = [c for c in df.columns if 'close' in c.lower()]
-        if candidates:
-            return df[candidates[0]].copy()
-        # if only one column present, return it
-        if df.shape[1] == 1:
-            return df.iloc[:, 0].copy()
-        raise ValueError(f"safe_to_series(): could not find a close-like column in DataFrame. Columns: {list(df.columns)}")
+    # אילוצים לכניסה/יציאה
+    include_rsi = st.checkbox('להשתמש ב‑RSI?', value=True)
+    include_adx = st.checkbox('להשתמש ב‑ADX?', value=True)
+    include_sma = st.checkbox('להשתמש ב‑SMA?', value=True)
+    check_not_strong_down = st.checkbox('לבדוק שהטרנד לא חזק מטה (SMA לא יורד)?', value=True)
 
-    # numpy array or list
-    if isinstance(s, (list, np.ndarray)):
-        return pd.Series(s)
+    st.subheader('כללי מסחר & מימון')
+    fractional_shares = st.checkbox('לאפשר רכישת שברי מניה?', value=True)
+    capital = st.number_input('הון התחלתי (ברירת מחדל)', min_value=1.0, value=10000.0, step=100.0)
 
-    raise ValueError(f"Unsupported data type for safe_to_series(): {type(s)}")
+    invest_mode = st.radio('שיטת השקעה לכל עסקה', options=['סכום קבוע לכל עסקה', 'הון ראשוני + ריבית דריבית'], index=0)
+    fixed_invest_amount = st.number_input('סכום להשקעה בכל עסקה (כאשר בחרת סכום קבוע)', min_value=1.0, value=1000.0, step=100.0)
 
+    # עמלות
+    st.subheader('עמלות')
+    commission_type = st.selectbox('סוג עמלה', options=['אחוז מכל עסקה', 'סכום קבוע'], index=0)
+    commission_value = st.number_input('ערך עמלה (לדוגמה: 0.1 עבור 0.1% או 2 עבור 2 ש"ח)', min_value=0.0, value=0.1)
 
-# --------------------- Safe indicator helpers ---------------------
+    # בחירת ביצוע - כניסה/יציאה ביום אותן או מחר
+    exec_mode = st.radio('מתי לבצע ביצוע (כניסה/יציאה) כאשר התנאי מתקיים', options=['ביום האותן', 'ביום המסחר הבא'], index=0)
+    execute_next_day = (exec_mode == 'ביום המסחר הבא')
 
-def safe_rsi(close, window=14):
-    close = safe_to_series(close)
-    try:
-        if RSIIndicator is not None:
-            rsi = RSIIndicator(close=close, window=int(window)).rsi()
-            rsi = pd.Series(rsi, index=close.index)
-            return rsi
-    except Exception:
-        pass
+    # טיפול בפוזיציה פתוחה בסיום
+    close_open_at_run = st.checkbox('לסגור פוזיציה פתוחה לפי מחיר יום ההרצה (אם קיימת)', value=True)
 
-    # fallback: Wilder's RSI implementation
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / window, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / window, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
+    # אופציות יצוא
+    st.subheader('ייצוא & ויזואליזציה')
+    enable_excel = st.checkbox('אפשרות ייצוא ל‑Excel', value=True)
+    enable_pdf = st.checkbox('אפשרות ייצוא ל‑PDF (טבלת דוח + גרף)', value=True)
 
+    # חימום אינדיקטורים
+    warmup_days = 250  # דרישתך — חימום קבוע
+    st.caption(f'חימום אינדיקטורים: {warmup_days} ימי מסחר (מוסתר למשתמש)')
 
-def safe_adx(high, low, close, window=14):
-    high = safe_to_series(high)
-    low = safe_to_series(low)
-    close = safe_to_series(close)
-    try:
-        if ADXIndicator is not None:
-            adx = ADXIndicator(high=high, low=low, close=close, window=int(window)).adx()
-            adx = pd.Series(adx, index=close.index)
-            return adx
-    except Exception:
-        pass
+    submit = st.form_submit_button('הרץ את הבדיקה')
 
-    # fallback implementation (Wilder smoothing)
-    plus_dm = high.diff()
-    minus_dm = -low.diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+# ---------- פונקציות עזר ----------
 
-    tr1 = high - low
-    tr2 = (high - close.shift()).abs()
-    tr3 = (low - close.shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-    atr = tr.ewm(alpha=1 / window, adjust=False).mean()
-    plus_di = 100 * (plus_dm.ewm(alpha=1 / window, adjust=False).mean() / atr.replace(0, np.nan))
-    minus_di = 100 * (minus_dm.ewm(alpha=1 / window, adjust=False).mean() / atr.replace(0, np.nan))
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
-    adx = dx.ewm(alpha=1 / window, adjust=False).mean()
-    return adx.fillna(0)
-
-
-def safe_ema(close, window=50):
-    close = safe_to_series(close)
-    try:
-        if EMAIndicator is not None:
-            ema = EMAIndicator(close=close, window=int(window)).ema_indicator()
-            ema = pd.Series(ema, index=close.index)
-            return ema
-    except Exception:
-        pass
-    return close.ewm(span=window, adjust=False).mean()
-
-
-def safe_macd(close):
-    close = safe_to_series(close)
-    try:
-        if MACD is not None:
-            macd = MACD(close=close)
-            macd_line = pd.Series(macd.macd(), index=close.index)
-            macd_sig = pd.Series(macd.macd_signal(), index=close.index)
-            return macd_line, macd_sig
-    except Exception:
-        pass
-
-    # fallback: short ema - long ema
-    fast = close.ewm(span=12, adjust=False).mean()
-    slow = close.ewm(span=26, adjust=False).mean()
-    macd_line = fast - slow
-    macd_sig = macd_line.ewm(span=9, adjust=False).mean()
-    return macd_line, macd_sig
-
-
-def safe_stochastic(high, low, close, k_window=14, d_window=3):
-    high = safe_to_series(high)
-    low = safe_to_series(low)
-    close = safe_to_series(close)
-    try:
-        if StochasticOscillator is not None:
-            stoch = StochasticOscillator(high=high, low=low, close=close, window=int(k_window), smooth_window=int(d_window))
-            k = pd.Series(stoch.stoch(), index=close.index)
-            d = pd.Series(stoch.stoch_signal(), index=close.index)
-            return k, d
-    except Exception:
-        pass
-
-    lowest_low = low.rolling(window=k_window, min_periods=1).min()
-    highest_high = high.rolling(window=k_window, min_periods=1).max()
-    k = 100 * ((close - lowest_low) / (highest_high - lowest_low).replace(0, np.nan))
-    d = k.rolling(window=d_window, min_periods=1).mean()
-    return k, d
-
-
-def safe_atr(high, low, close, window=14):
-    high = safe_to_series(high)
-    low = safe_to_series(low)
-    close = safe_to_series(close)
-    try:
-        if AverageTrueRange is not None:
-            atr = AverageTrueRange(high=high, low=low, close=close, window=int(window)).average_true_range()
-            atr = pd.Series(atr, index=close.index)
-            return atr
-    except Exception:
-        pass
-
-    tr1 = high - low
-    tr2 = (high - close.shift()).abs()
-    tr3 = (low - close.shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1 / window, adjust=False).mean()
-    return atr
-
-
-# --------------------- add_indicators (robust) ---------------------
-
-def add_indicators(df, params):
-    """
-    Robust add_indicators:
-    - flattens columns
-    - finds close/high/low in a case-insensitive manner (accepts 'Adj Close')
-    - if any missing -> write debug info and return df unchanged (instead of raising)
-    """
-    df = _flatten_columns(df)
-    df = df.copy()
-
-    # map original -> lower for searching
-    col_lower = {c: c.lower() for c in df.columns}
-
-    def find_col_with_keyword(keywords):
-        for k in keywords:
-            for orig, low in col_lower.items():
-                if k in low:
-                    return orig
-        return None
-
-    close_col = find_col_with_keyword(['close', 'adj close', 'adjclose'])
-    high_col = find_col_with_keyword(['high'])
-    low_col = find_col_with_keyword(['low'])
-
-    if not (close_col and high_col and low_col):
-        st.error("❌ add_indicators: לא הצלחנו לאתר עמודות Close/High/Low ב-DataFrame.")
-        st.write("Columns present:", list(df.columns))
-        st.write("Sample rows (head):")
-        st.write(df.head(5))
+def download_price_data(ticker, start_date, end_date, interval, warmup_days):
+    # הורדה תכלול חימום: נוריד מהתאריך start_date פחות warmup_days
+    start_fetch = pd.to_datetime(start_date) - pd.Timedelta(days=warmup_days)
+    # yfinance: להשתמש ב-auto_adjust=True כדי לקבל Close מותאם (Adjusted Close)
+    df = yf.download(ticker, start=start_fetch.strftime('%Y-%m-%d'), end=(pd.to_datetime(end_date)+pd.Timedelta(days=1)).strftime('%Y-%m-%d'), interval=interval, progress=False, auto_adjust=True)
+    if df.empty:
         return df
+    df = df.dropna(how='all')
+    return df
 
-    # use the discovered column names
-    close = safe_to_series(df[[close_col]])
-    high = safe_to_series(df[[high_col]])
-    low = safe_to_series(df[[low_col]])
 
+def compute_indicators(df, rsi_period, adx_period, sma_period):
+    df = df.copy()
     # RSI
-    rsi_period = int(params.get('rsi_period', 14))
     try:
-        df['RSI'] = safe_rsi(close, rsi_period)
-    except Exception as e:
-        st.warning(f"safe_rsi failed: {e}")
-        df['RSI'] = np.nan
+        df['RSI'] = ta.rsi(df['Close'], length=rsi_period)
+    except Exception:
+        df['RSI'] = df['Close'].rolling(rsi_period).apply(lambda x: np.nan)
 
-    # ADX
-    adx_period = int(params.get('adx_period', rsi_period))
+    # ADX — pandas_ta מחזירה df עם טורים DI+/DI-/ADX
     try:
-        df['ADX'] = safe_adx(high, low, close, adx_period)
-    except Exception as e:
-        st.warning(f"safe_adx failed: {e}")
+        adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=adx_period)
+        # העמודה ADX_{len}
+        adx_col = f'ADX_{adx_period}'
+        if adx_col in adx_df.columns:
+            df['ADX'] = adx_df[adx_col]
+        else:
+            df['ADX'] = adx_df['ADX']
+    except Exception:
         df['ADX'] = np.nan
 
-    # SMA/EMA
-    sma_period = int(params.get('sma_period', 50))
-    df['SMA'] = close.rolling(sma_period).mean()
-    df['EMA'] = safe_ema(close, sma_period)
-
-    # MACD
-    try:
-        macd_line, macd_sig = safe_macd(close)
-        df['MACD'] = macd_line
-        df['MACD_SIGNAL'] = macd_sig
-    except Exception as e:
-        st.warning(f"safe_macd failed: {e}")
-        df['MACD'] = np.nan
-        df['MACD_SIGNAL'] = np.nan
-
-    # Stochastic
-    stoch_k_period = int(params.get('stoch_k_period', 14))
-    try:
-        stoch_k, stoch_d = safe_stochastic(high, low, close, stoch_k_period, 3)
-        df['STOCH_K'] = stoch_k
-        df['STOCH_D'] = stoch_d
-    except Exception as e:
-        st.warning(f"safe_stochastic failed: {e}")
-        df['STOCH_K'] = np.nan
-        df['STOCH_D'] = np.nan
-
-    # ATR
-    atr_period = int(params.get('atr_period', 14))
-    try:
-        df['ATR'] = safe_atr(high, low, close, atr_period)
-    except Exception as e:
-        st.warning(f"safe_atr failed: {e}")
-        df['ATR'] = np.nan
-
-    # Ensure index is datetime
-    try:
-        df.index = pd.to_datetime(df.index)
-    except Exception:
-        pass
+    # SMA על ה-Close (Adjusted Close ניתן כ-Close כאשר auto_adjust=True)
+    df[f'SMA_{sma_period}'] = df['Close'].rolling(window=sma_period).mean()
 
     return df
 
 
-# --------------------- Backtest logic ---------------------
-
-def single_run_backtest(df, params):
-    """
-    Backtest single run.
-    Returns: trades_df (columns in snake_case), summary dict with keys:
-      'n_trades', 'compounded_return_pct', 'avg_trade_pct', 'win_rate'
-    """
-    df = add_indicators(df, params)
-    df.columns = [str(c) for c in df.columns]
-
-    # debug
-    expected_cols = ['RSI', 'ADX', 'SMA', 'EMA']
-    existing_cols = list(df.columns)
-    st.write("📊 עמודות קיימות לאחר add_indicators:", existing_cols)
-
-    # dropna on the indicators that exist
-    valid_drop_cols = [c for c in ['RSI', 'ADX'] if c in df.columns]
-    if valid_drop_cols:
-        df = df.dropna(subset=valid_drop_cols, how='any')
+def calc_commission(value, commission_type, commission_value):
+    if commission_value == 0:
+        return 0.0
+    if commission_type == 'אחוז מכל עסקה':
+        # commission_value given as percentage (e.g. 0.1 means 0.1%)
+        return value * (commission_value / 100.0)
     else:
-        st.warning("⚠️ לא נמצאו אינדיקטורים לניקוי ערכים חסרים – ממשיך בלי dropna().")
+        # סכום קבוע
+        return commission_value
 
-    # dynamic column discovery
-    rsi_col = next((c for c in df.columns if str(c).lower().startswith('rsi')), None)
-    adx_col = next((c for c in df.columns if str(c).lower().startswith('adx')), None)
-    sma_col = 'SMA' if 'SMA' in df.columns else None
-    ema_col = 'EMA' if 'EMA' in df.columns else None
 
-    st.write(f"🔍 זוהו אינדיקטורים: RSI={rsi_col}, ADX={adx_col}, SMA={sma_col}, EMA={ema_col}")
+# ---------- לוגיקת בחינה מרכזית ----------
 
-    # require at least RSI, ADX and one of SMA/EMA
-    if not (rsi_col and adx_col and (sma_col or ema_col)):
-        st.error("❌ דרושים RSI, ADX ואחת מה-SMA/EMA. בדוק את add_indicators.")
-        return pd.DataFrame(), {}
+if submit:
+    # בדיקה מהירה על קלט
+    if not tickers:
+        st.error('אין טיקרים. אנא הזן טיקר/ים חוקיים.')
+    else:
+        results_all = {}
+        bh_comparison = {}
 
-    # params
-    rsi_entry = float(params.get('rsi_entry', 30.0))
-    rsi_exit = float(params.get('rsi_exit', 70.0))
-    adx_threshold = float(params.get('adx_threshold', params.get('adx_thresh', 20.0)))
-    ma_type = params.get('ma_type', 'SMA')
-    use_ma = bool(params.get('use_sma', True))
-    close_open_on_run = bool(params.get('close_open_on_run', True))
+        for ticker in tickers:
+            with st.spinner(f'מוריד נתונים ועורך חישובים עבור {ticker} ...'):
+                df = download_price_data(ticker, start_date, end_date, timeframe, warmup_days)
+                if df.empty:
+                    st.error(f'לא נמצאו נתונים עבור {ticker} בפרק זמן זה או השילוב של טיימפריים אינו נתמך על ידי Yahoo.')
+                    continue
 
-    # fees
-    fee_type = params.get('fee_type', 'none')
-    fee_value = float(params.get('fee_value', 0.0))
-    fee_percent = float(params.get('fee_percent', 0.0))
+                df = compute_indicators(df, rsi_period, adx_period, sma_period)
 
-    trades = []
-    in_position = False
-    entry_price = None
-    entry_date = None
-    entry_meta = {}
+                # הגדרת החלון שבו נרצה לסרוק — מ־start_date ועד end_date
+                scan_df = df.loc[str(start_date):str(end_date)].copy()
+                scan_df = scan_df.dropna(subset=['Close'])
 
-    for i in range(len(df)):
-        row = df.iloc[i]
-        date = row.name
-        close_price = row.get('Close', np.nan)
-        rsi_val = row.get(rsi_col, np.nan)
-        adx_val = row.get(adx_col, np.nan)
+                # מוודאים שיש מספיק נתונים (לאחר חימום)
+                if scan_df.empty:
+                    st.warning(f'לא נמצאו ימים לסריקה עבור {ticker} לאחר חימום.')
+                    continue
 
-        # choose MA value based on ma_type and availability
-        ma_val = None
-        if ma_type == 'EMA' and ema_col:
-            ma_val = row.get(ema_col, np.nan)
-        elif sma_col:
-            ma_val = row.get(sma_col, np.nan)
-
-        # skip rows with NaN essential values
-        if pd.isna(rsi_val) or pd.isna(adx_val) or pd.isna(close_price) or (use_ma and pd.isna(ma_val)):
-            continue
-
-        # entry condition: RSI below entry, ADX above threshold, and price > MA (if enabled)
-        entry_cond = (not in_position) and (rsi_val < rsi_entry) and (adx_val > adx_threshold)
-        if use_ma:
-            entry_cond = entry_cond and (close_price > ma_val)
-
-        if entry_cond:
-            in_position = True
-            entry_price = float(close_price)
-            entry_date = date
-            entry_meta = {
-                'entry_rsi': float(rsi_val),
-                'entry_adx': float(adx_val),
-                'entry_ma': float(ma_val) if ma_val is not None else np.nan
-            }
-            continue
-
-        # exit condition
-        if in_position:
-            exit_cond = (rsi_val > rsi_exit) or (use_ma and (close_price < ma_val))
-            if exit_cond:
-                exit_price = float(close_price)
-                exit_date = date
-                raw_profit_pct = (exit_price / entry_price - 1) * 100.0 if entry_price != 0 else 0.0
-
-                trades.append({
-                    'entry_date': entry_date,
-                    'exit_date': exit_date,
-                    'entry_price': entry_price,
-                    'exit_price': exit_price,
-                    'raw_profit_pct': raw_profit_pct,
-                    'entry_rsi': entry_meta.get('entry_rsi', np.nan),
-                    'entry_adx': entry_meta.get('entry_adx', np.nan),
-                    'entry_ma': entry_meta.get('entry_ma', np.nan)
-                })
+                trades = []
                 in_position = False
-                entry_price = None
-                entry_date = None
-                entry_meta = {}
+                entry = {}
 
-    # optionally close open position at the last available price
-    if in_position and close_open_on_run:
-        last_row = df.iloc[-1]
-        last_price = float(last_row.get('Close', np.nan))
-        if not pd.isna(last_price) and entry_price is not None:
-            exit_price = last_price
-            exit_date = df.index[-1]
-            raw_profit_pct = (exit_price / entry_price - 1) * 100.0 if entry_price != 0 else 0.0
-            trades.append({
-                'entry_date': entry_date,
-                'exit_date': exit_date,
-                'entry_price': entry_price,
-                'exit_price': exit_price,
-                'raw_profit_pct': raw_profit_pct,
-                'entry_rsi': entry_meta.get('entry_rsi', np.nan),
-                'entry_adx': entry_meta.get('entry_adx', np.nan),
-                'entry_ma': entry_meta.get('entry_ma', np.nan)
-            })
-            in_position = False
+                # Variables for capital management
+                equity = capital
+                cumulative_equity = []
 
-    trades_df = pd.DataFrame(trades)
+                # Prepare for Buy & Hold
+                # invest capital at first available day in scan
+                bh_start_price = None
+                bh_end_price = None
 
-    if trades_df.empty:
-        summary = {'n_trades': 0, 'compounded_return_pct': 0.0, 'avg_trade_pct': 0.0, 'win_rate': 0.0}
-        return trades_df, summary
+                # get index list for date navigation
+                idx_list = list(scan_df.index)
 
-    # apply fees and compute profit after fees per trade
-    def profit_after_fees_row(row):
-        e = float(row['entry_price'])
-        x = float(row['exit_price'])
-        if fee_type == 'absolute':
-            total_fee = fee_value * 2.0  # entry + exit
-            profit = (x - e - total_fee) / e * 100.0 if e != 0 else 0.0
-        elif fee_type == 'percent':
-            cost = e * (1.0 + fee_percent / 100.0)
-            proceeds = x * (1.0 - fee_percent / 100.0)
-            profit = (proceeds / cost - 1.0) * 100.0 if cost != 0 else 0.0
-        else:
-            profit = (x / e - 1.0) * 100.0 if e != 0 else 0.0
-        return profit
+                # find buy&hold start
+                for d in idx_list:
+                    bh_start_price = scan_df.loc[d, 'Close']
+                    break
 
-    trades_df['profit_pct'] = trades_df.apply(profit_after_fees_row, axis=1)
-    trades_df['win'] = trades_df['profit_pct'] > 0
+                # Loop through each day in scan_df
+                for i, current_date in enumerate(idx_list):
+                    row = scan_df.loc[current_date]
 
-    # compounded return (per_trade by default)
-    capital = float(params.get('capital', 1000.0))
-    cap = capital
-    for p in trades_df['profit_pct'].fillna(0.0):
-        cap = cap * (1.0 + float(p) / 100.0)
-    compounded_return_pct = (cap - capital) / capital * 100.0 if capital != 0 else 0.0
+                    # read indicator values
+                    price = row['Close']
+                    rsi_v = row.get('RSI', np.nan)
+                    adx_v = row.get('ADX', np.nan)
+                    sma_v = row.get(f'SMA_{sma_period}', np.nan)
 
-    summary = {
-        'n_trades': len(trades_df),
-        'compounded_return_pct': compounded_return_pct,
-        'avg_trade_pct': float(trades_df['profit_pct'].mean()),
-        'win_rate': float(trades_df['win'].mean())
-    }
+                    # ENTRY logic
+                    entry_cond = True
+                    if include_rsi:
+                        entry_cond = entry_cond and (not np.isnan(rsi_v)) and (rsi_v <= rsi_entry_thresh)
+                    if include_adx:
+                        entry_cond = entry_cond and (not np.isnan(adx_v)) and (adx_v <= adx_thresh)
+                    if include_sma:
+                        entry_cond = entry_cond and (not np.isnan(sma_v)) and (price > sma_v)
 
-    return trades_df, summary
+                    if check_not_strong_down and include_sma:
+                        # בדיקה שה-SMA לא יורד לעומת יום קודם (כללי פשוט)
+                        prev_idx = i-1
+                        if prev_idx >= 0:
+                            prev_sma = scan_df.iloc[prev_idx].get(f'SMA_{sma_period}', np.nan)
+                            if not np.isnan(prev_sma) and not np.isnan(sma_v):
+                                entry_cond = entry_cond and (sma_v >= prev_sma)
 
+                    # אם מתרחש תנאי כניסה ואין פוזיציה פתוחה
+                    if (not in_position) and entry_cond:
+                        # בחר יום ביצוע — היום או הבא
+                        exec_i = i+1 if execute_next_day else i
+                        if exec_i < len(idx_list):
+                            exec_date = idx_list[exec_i]
+                            exec_price = scan_df.loc[exec_date, 'Close']
 
-# --------------------- Grid utilities & UI ---------------------
+                            # קביעת כמות השקעה
+                            if invest_mode == 'סכום קבוע לכל עסקה':
+                                invest_amount = fixed_invest_amount
+                            else:
+                                # compound: invest all equity
+                                invest_amount = equity
 
-def parse_range_input(text_or_list, cast=int):
-    if isinstance(text_or_list, (list, tuple)):
-        return [cast(x) for x in text_or_list]
-    s = str(text_or_list).strip()
-    if not s:
-        return []
-    parts = [p.strip() for p in s.split(',') if p.strip()]
-    values = []
-    for p in parts:
-        if '-' in p:
-            if ':' in p:
-                rng, step = p.split(':')
-                start, end = [int(x) for x in rng.split('-')]
-                step = int(step)
-                values.extend(list(range(start, end + 1, step)))
+                            quantity = invest_amount / exec_price
+                            if not fractional_shares:
+                                quantity = np.floor(quantity)
+                                if quantity <= 0:
+                                    # לא יכול לקנות מניה שלמה
+                                    continue
+
+                            entry_comm = calc_commission(invest_amount, commission_type, commission_value)
+                            equity -= entry_comm  # יורד מההון
+
+                            entry = {
+                                'entry_date': exec_date,
+                                'entry_price': exec_price,
+                                'entry_RSI': scan_df.loc[exec_date].get('RSI', np.nan),
+                                'entry_ADX': scan_df.loc[exec_date].get('ADX', np.nan),
+                                'entry_SMA': scan_df.loc[exec_date].get(f'SMA_{sma_period}', np.nan),
+                                'quantity': quantity,
+                                'invest_amount': invest_amount,
+                                'entry_commission': entry_comm
+                            }
+                            in_position = True
+
+                    # EXIT logic — רק אם יש פוזיציה
+                    if in_position:
+                        exit_cond = True
+                        # RSI condition
+                        if include_rsi:
+                            exit_cond = exit_cond and (not np.isnan(row.get('RSI', np.nan))) and (row.get('RSI', np.nan) >= rsi_exit_thresh)
+                        # second condition: price exit > entry price (כפי שהוגדר)
+                        # We'll evaluate on exec day price (today or next day depending on setting)
+
+                        if exit_cond:
+                            exec_i = i+1 if execute_next_day else i
+                            if exec_i < len(idx_list):
+                                exit_date = idx_list[exec_i]
+                                exit_price = scan_df.loc[exit_date, 'Close']
+
+                                # require price higher than entry price
+                                if exit_price > entry['entry_price']:
+                                    # סגירה
+                                    gross = (exit_price - entry['entry_price']) * entry['quantity']
+                                    exit_comm = calc_commission(exit_price * entry['quantity'], commission_type, commission_value)
+                                    net = gross - exit_comm
+
+                                    # עדכון equity בהתאם למצב בחישוב
+                                    if invest_mode == 'סכום קבוע לכל עסקה':
+                                        # לא משקיעים עוד מההון אלא משאירים הון כפי שהיה
+                                        equity += entry['invest_amount'] + net
+                                    else:
+                                        # compound: נכנסנו עם equity והמשכנו עם כל הסכום עד עכשיו
+                                        equity = equity + net
+
+                                    trades.append({
+                                        'entry_date': entry['entry_date'].strftime('%Y-%m-%d %H:%M:%S') if isinstance(entry['entry_date'], pd.Timestamp) else str(entry['entry_date']),
+                                        'entry_price': entry['entry_price'],
+                                        'entry_RSI': entry.get('entry_RSI', np.nan),
+                                        'entry_ADX': entry.get('entry_ADX', np.nan),
+                                        'entry_SMA': entry.get('entry_SMA', np.nan),
+                                        'exit_date': exit_date.strftime('%Y-%m-%d %H:%M:%S') if isinstance(exit_date, pd.Timestamp) else str(exit_date),
+                                        'exit_price': exit_price,
+                                        'exit_RSI': scan_df.loc[exit_date].get('RSI', np.nan),
+                                        'exit_ADX': scan_df.loc[exit_date].get('ADX', np.nan),
+                                        'exit_SMA': scan_df.loc[exit_date].get(f'SMA_{sma_period}', np.nan),
+                                        'quantity': entry['quantity'],
+                                        'gross_PL': gross,
+                                        'entry_commission': entry['entry_commission'],
+                                        'exit_commission': exit_comm,
+                                        'net_PL': net,
+                                        'pnl_pct': (net / (entry['invest_amount'] if entry['invest_amount']>0 else 1)) * 100
+                                    })
+
+                                    in_position = False
+                                    entry = {}
+
+                    # update cumulative equity tracking
+                    cumulative_equity.append(equity)
+
+                # אם נשארת פוזיציה פתוחה בסיום הסקירה
+                if in_position:
+                    last_date = idx_list[-1]
+                    last_price = scan_df.loc[last_date, 'Close']
+                    # אם המשתמש בחר לסגור לפי יום הריצה — נעשה זאת
+                    if close_open_at_run:
+                        exit_price = last_price
+                        gross = (exit_price - entry['entry_price']) * entry['quantity']
+                        exit_comm = calc_commission(exit_price * entry['quantity'], commission_type, commission_value)
+                        net = gross - exit_comm
+
+                        if invest_mode == 'סכום קבוע לכל עסקה':
+                            equity += entry['invest_amount'] + net
+                        else:
+                            equity = equity + net
+
+                        trades.append({
+                            'entry_date': entry['entry_date'].strftime('%Y-%m-%d %H:%M:%S') if isinstance(entry['entry_date'], pd.Timestamp) else str(entry['entry_date']),
+                            'entry_price': entry['entry_price'],
+                            'entry_RSI': entry.get('entry_RSI', np.nan),
+                            'entry_ADX': entry.get('entry_ADX', np.nan),
+                            'entry_SMA': entry.get('entry_SMA', np.nan),
+                            'exit_date': last_date.strftime('%Y-%m-%d %H:%M:%S') if isinstance(last_date, pd.Timestamp) else str(last_date),
+                            'exit_price': exit_price,
+                            'exit_RSI': scan_df.loc[last_date].get('RSI', np.nan),
+                            'exit_ADX': scan_df.loc[last_date].get('ADX', np.nan),
+                            'exit_SMA': scan_df.loc[last_date].get(f'SMA_{sma_period}', np.nan),
+                            'quantity': entry['quantity'],
+                            'gross_PL': gross,
+                            'entry_commission': entry['entry_commission'],
+                            'exit_commission': exit_comm,
+                            'net_PL': net,
+                            'pnl_pct': (net / (entry['invest_amount'] if entry['invest_amount']>0 else 1)) * 100,
+                            'note': 'סגירה לפי יום הריצה (פוזיציה פתוחה בתום התקופה)'
+                        })
+                        in_position = False
+
+                # Buy & Hold comparison
+                if bh_start_price is not None:
+                    # find last available price in scan_df
+                    for d in reversed(idx_list):
+                        bh_end_price = scan_df.loc[d, 'Close']
+                        break
+
+                    # compute shares bought with initial capital
+                    bh_shares = capital / bh_start_price
+                    bh_gross = (bh_end_price - bh_start_price) * bh_shares
+                    # commissions: apply entry and exit
+                    bh_entry_comm = calc_commission(capital, commission_type, commission_value)
+                    bh_exit_comm = calc_commission(bh_end_price * bh_shares, commission_type, commission_value)
+                    bh_net = bh_gross - (bh_entry_comm + bh_exit_comm)
+
+                    bh_comparison[ticker] = {
+                        'bh_start_price': bh_start_price,
+                        'bh_end_price': bh_end_price,
+                        'bh_gross_PL': bh_gross,
+                        'bh_net_PL': bh_net,
+                        'bh_pct_net': (bh_net / capital) * 100
+                    }
+
+                # יבוא תוצאות
+                trades_df = pd.DataFrame(trades)
+                total_net = trades_df['net_PL'].sum() if not trades_df.empty else 0.0
+                total_gross = trades_df['gross_PL'].sum() if not trades_df.empty else 0.0
+                total_comm = trades_df['entry_commission'].sum() + trades_df['exit_commission'].sum() if not trades_df.empty else 0.0
+
+                results_all[ticker] = {
+                    'trades_df': trades_df,
+                    'total_net': total_net,
+                    'total_gross': total_gross,
+                    'total_commissions': total_comm,
+                    'final_equity': equity,
+                    'cumulative_equity': cumulative_equity,
+                    'price_df': scan_df
+                }
+
+        # ---------- תצוגת תוצאות במסך ----------
+        for ticker, res in results_all.items():
+            st.header(f'תוצאות עבור {ticker}')
+            trades_df = res['trades_df']
+
+            if trades_df.empty:
+                st.info('לא נרשמו פוזיציות במהלך התקופה.')
             else:
-                start, end = [int(x) for x in p.split('-')]
-                values.extend(list(range(start, end + 1)))
-        else:
-            values.append(cast(p))
-    return sorted(list(dict.fromkeys(values)))
+                # טבלה מפורטת
+                st.subheader('טבלת פוזיציות')
+                st.dataframe(trades_df)
 
+                # סיכום מספרי
+                st.markdown('**סיכום ביצועים**')
+                col1, col2, col3 = st.columns(3)
+                col1.metric('סה"כ רווח נקי', f"{res['total_net']:.2f}")
+                col2.metric('סה"כ רווח ברוטו', f"{res['total_gross']:.2f}")
+                col3.metric('סה"כ עמלות ששולמו', f"{res['total_commissions']:.2f}")
 
-# --------------------- Streamlit UI ---------------------
+            # גרף מחיר עם סימוני כניסה/יציאה
+            st.subheader('גרף מחיר — כניסות ויציאות')
+            price_df = res['price_df']
+            fig, ax = plt.subplots(figsize=(12, 5))
+            ax.plot(price_df.index, price_df['Close'], label='מחיר (Adjusted Close)')
+            if f'SMA_{sma_period}' in price_df.columns:
+                ax.plot(price_df.index, price_df[f'SMA_{sma_period}'], label=f'SMA {sma_period}')
 
-st.title('Indicator Backtester — Robust')
-left, right = st.columns(2)
-with left:
-    ticker = st.text_input('שם מניה (Ticker)', value='AAPL')
-    start_date = st.date_input('תאריך תחילת סריקה', value=pd.to_datetime('2023-01-01'))
-    end_date = st.date_input('תאריך סוף סריקה', value=pd.to_datetime(datetime.today().date()))
-    interval = st.selectbox('בחירת גרף', options=['1d', '60m'], index=0, format_func=lambda x: 'יומי' if x == '1d' else 'שاعي')
-with right:
-    rsi_period = st.number_input('ימים ל-RSI (window)', min_value=2, max_value=200, value=14)
-    adx_period = st.number_input('ימים ל-ADX (window)', min_value=2, max_value=200, value=14)
-    sma_period = st.number_input('SMA/EMA period', min_value=1, max_value=500, value=50)
-    rsi_entry = st.number_input('רף RSI כניסה', min_value=0.0, max_value=100.0, value=30.0)
-    rsi_exit = st.number_input('רף RSI יציאה', min_value=0.0, max_value=100.0, value=60.0)
-    adx_threshold = st.number_input('רף ADX — כניסה כאשר ADX גבוה מ:', min_value=0.0, max_value=200.0, value=25.0)
+            # סימוני כניסה/יציאה
+            if not trades_df.empty:
+                for _, t in trades_df.iterrows():
+                    try:
+                        ed = pd.to_datetime(t['entry_date'])
+                        xd = pd.to_datetime(t['exit_date'])
+                        ax.scatter(ed, t['entry_price'], marker='^', s=100)
+                        ax.scatter(xd, t['exit_price'], marker='v', s=100)
+                    except Exception:
+                        pass
 
-st.markdown('---')
-st.subheader('בחירת אינדיקטורים שישתתפו באסטרטגיה')
-col1, col2, col3 = st.columns(3)
-with col1:
-    macd_use = st.checkbox('השתמש ב-MACD (הצג/השתמש)', value=False)
-    if macd_use:
-        macd_part = st.multiselect('MACD ישתתף ב־', options=['Entry', 'Exit'], default=['Entry'])
-    else:
-        macd_part = []
-with col2:
-    stoch_use = st.checkbox('השתמש ב-Stochastic (K/D)', value=False)
-    if stoch_use:
-        stoch_part = st.multiselect('Stochastic ישתתף ב־', options=['Entry', 'Exit'], default=['Entry'])
-        stoch_entry_thr = st.number_input('Stochastic — Threshold כניסה (K)', value=20.0)
-        stoch_exit_thr = st.number_input('Stochastic — Threshold יציאה (K)', value=80.0)
-    else:
-        stoch_part = []
-        stoch_entry_thr = 20.0
-        stoch_exit_thr = 80.0
-with col3:
-    atr_use = st.checkbox('השתמש ב-ATR (לסינון/וולאטיליות)', value=False)
-    if atr_use:
-        atr_part = st.multiselect('ATR ישתתף ב־', options=['Entry', 'Exit'], default=[])
-        atr_entry_max = st.number_input('ATR — מקסימום לכניסה (אם בוחרים)', value=99999.0)
-        atr_exit_min = st.number_input('ATR — מינימום ליציאה (אם בוחרים)', value=-1.0)
-    else:
-        atr_part = []
-        atr_entry_max = 99999.0
-        atr_exit_min = -1.0
+            ax.set_title(f'{ticker} — Price with entries/exits')
+            ax.legend()
+            st.pyplot(fig)
 
-ma_type = st.selectbox('סוג MA', options=['SMA', 'EMA'], index=0)
-use_ma = st.checkbox('לכלול בדיקת מחיר > MA כצעד בתנאי הכניסה', value=True)
-st.markdown('---')
-colf1, colf2 = st.columns(2)
-with colf1:
-    close_open_option = st.checkbox('לסגור פוזיציה פתוחה ביום הרצת הקוד (אם יש)', value=True)
-    fee_mode = st.selectbox('עמלות', options=['none', 'absolute', 'percent'])
-    fee_value = 0.0
-    fee_percent = 0.0
-    if fee_mode == 'absolute':
-        fee_value = st.number_input('עמלת כניסה/יציאה (מטבע) - absolute', value=0.0)
-    elif fee_mode == 'percent':
-        fee_percent = st.number_input('עמלת כניסה/יציאה (%) - percent', value=0.0)
-with colf2:
-    export_csv = st.checkbox('אפשרות לייצא לטבלה (CSV)', value=True)
-    return_mode = st.selectbox('צורת חישוב תשואה', options=['per_trade', 'fixed_investment'],
-                               format_func=lambda x: 'דריבית/חיוב מחדש' if x == 'per_trade' else 'הפקדה קבועה לכל עסקה')
-    capital = st.number_input('הון התחלתי (לצורך חישוב דריבית)', value=1000.0, min_value=0.0)
-    investment_per_trade = st.number_input('הפקדה קבועה לכל עסקה', value=100.0, min_value=0.0)
+            # כפתורי הורדה: Excel / PDF / PNG
+            # Excel
+            if enable_excel and not trades_df.empty:
+                towrite = BytesIO()
+                with pd.ExcelWriter(towrite, engine='xlsxwriter') as writer:
+                    trades_df.to_excel(writer, sheet_name='Trades', index=False)
+                    # Price sheet
+                    res['price_df'].to_excel(writer, sheet_name='PriceData')
+                towrite.seek(0)
+                st.download_button(label='הורד דוח Excel (.xlsx)', data=towrite, file_name=f'{ticker}_backtest.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-st.markdown('---')
-st.subheader('Grid Search — הרצת ריבוי פרמטרים')
-use_grid = st.checkbox('הפעל Grid Search (בדיקת וריאציות פרמטרים)', value=False)
-grid_col1, grid_col2 = st.columns(2)
-with grid_col1:
-    rsi_entry_range = st.text_input('טווח RSI כניסה — רשום כמו "10-40:5" או "10,20,30"', value='20-40:5')
-    rsi_exit_range = st.text_input('טווח RSI יציאה — לדוגמה "50-80:5"', value='55-70:5')
-with grid_col2:
-    adx_range = st.text_input('טווח ADX threshold — לדוגמה "10,20,30" או "10-50:10"', value='10,20,30')
-    sma_range = st.text_input('טווח SMA periods — לדוגמה "20,50,100" או "10-100:10"', value='20,50,100')
+            # PDF export — נשמור גרף + טבלה בדף PDF
+            if enable_pdf and not trades_df.empty:
+                pdf_bytes = BytesIO()
+                with PdfPages(pdf_bytes) as pdf:
+                    # גרף
+                    pdf.savefig(fig)
 
-max_combinations = st.number_input('מגבלת קומבינציות מרבית ל-run (המלצה 200)', min_value=10, max_value=5000, value=300)
-run_button = st.button('הרצת הבדיקה (Run Backtest / Grid)')
+                    # טבלה כשרטוט matplotlib
+                    fig_table, ax_table = plt.subplots(figsize=(12, 6))
+                    ax_table.axis('off')
+                    tbl = ax_table.table(cellText=trades_df.round(4).values, colLabels=trades_df.columns, loc='center')
+                    tbl.auto_set_font_size(False)
+                    tbl.set_fontsize(8)
+                    tbl.scale(1, 1.5)
+                    pdf.savefig(fig_table)
+                    plt.close(fig_table)
 
+                pdf_bytes.seek(0)
+                st.download_button(label='הורד דוח PDF', data=pdf_bytes, file_name=f'{ticker}_report.pdf', mime='application/pdf')
 
-if run_button:
-    with st.spinner('מוריד נתונים ומריץ בדיקה — זה עשוי לקחת זמן עבור Grid Search...'):
-        # handle intraday limits: for intraday prefer period
-        if interval.endswith('m') and (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days > 90:
-            # for intraday long ranges, use period to avoid empty data from yfinance
-            df = yf.download(ticker, period='90d', interval=interval, progress=False)
-        else:
-            df = yf.download(ticker, start=start_date, end=end_date + pd.Timedelta(days=1), interval=interval, progress=False)
+            # הורדת גרף PNG
+            buf = BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight')
+            buf.seek(0)
+            st.download_button(label='הורד גרף PNG', data=buf, file_name=f'{ticker}_chart.png', mime='image/png')
 
-        # debug info
-        st.write("Downloaded df columns:", list(df.columns))
-        st.write("Downloaded df shape:", df.shape)
-        st.write("Downloaded df head (first 3 rows):")
-        st.write(df.head(3))
+            # השוואה ל-BUY & HOLD
+            if ticker in bh_comparison:
+                st.subheader('השוואה ל‑Buy & Hold')
+                b = bh_comparison[ticker]
+                col1, col2, col3 = st.columns(3)
+                col1.metric('BH רווח נקי', f"{b['bh_net_PL']:.2f}")
+                col2.metric('BH תשואה נקו (%)', f"{b['bh_pct_net']:.2f}%")
+                col3.write('---')
 
-        if df.empty:
-            st.error('לא נמצאו נתונים — בדוק את הטיקר, טווח התאריכים או האינטרוול.')
-        else:
-            base_params = {
-                'rsi_period': rsi_period,
-                'adx_period': adx_period,
-                'sma_period': sma_period,
-                'rsi_entry': rsi_entry,
-                'rsi_exit': rsi_exit,
-                'adx_threshold': adx_threshold,
-                'use_sma': use_ma,
-                'ma_type': ma_type,
-                'close_open_on_run': close_open_option,
-                'fee_type': fee_mode,
-                'fee_value': fee_value,
-                'fee_percent': fee_percent,
-                'capital': capital,
-                'investment_per_trade': investment_per_trade,
-                'macd_part': macd_part,
-                'stoch_part': stoch_part,
-                'stoch_entry_thr': stoch_entry_thr,
-                'stoch_exit_thr': stoch_exit_thr,
-                'atr_part': atr_part,
-                'atr_entry_max': atr_entry_max,
-                'atr_exit_min': atr_exit_min
-            }
+        st.success('הרצה הושלמה.')
 
-            if not use_grid:
-                params = base_params.copy()
-                params.update({'rsi_period': rsi_period, 'adx_period': adx_period, 'sma_period': sma_period, 'ma_type': ma_type})
-                trades_df, summary = single_run_backtest(df, params)
-
-                st.subheader('תוצאות בדיקה — תצוגה יחידה')
-                st.write(f'Ticker: {ticker} | Period: {start_date} — {end_date} | Interval: {"יומי" if interval=="1d" else "שاعي"}')
-
-                if trades_df.empty:
-                    st.info('לא נרשמו פוזיציות עבור התנאים שהוזנו.')
-                else:
-                    display_df = trades_df.copy()
-
-                    # ensure datetime -> date for readable display
-                    display_df['entry_date'] = pd.to_datetime(display_df['entry_date']).dt.date
-                    display_df['exit_date'] = pd.to_datetime(display_df['exit_date']).dt.date
-
-                    # prepare columns to show (fill missing columns with NaN)
-                    cols_to_show = ['entry_date', 'entry_rsi', 'entry_adx', 'entry_ma', 'entry_price',
-                                    'exit_date', 'exit_price', 'profit_pct']
-                    for c in cols_to_show:
-                        if c not in display_df.columns:
-                            display_df[c] = np.nan
-
-                    display_df = display_df[cols_to_show]
-                    display_df.columns = ['תאריך כניסה', 'RSI כניסה', 'ADX כניסה', 'MA כניסה', 'מחיר כניסה',
-                                          'תאריך יציאה', 'מחיר יציאה', 'אחוז רווח/הפסד']
-                    st.dataframe(display_df)
-
-                    st.metric('מספר עסקאות', summary['n_trades'])
-                    st.metric('תשואה מצטברת (דריבית)', f"{summary['compounded_return_pct']:.2f}%")
-                    st.metric('תשואה ממוצעת לעסקה', f"{summary['avg_trade_pct']:.2f}%")
-                    st.metric('שיעור הצלחות (win rate)', f"{summary['win_rate']*100:.1f}%")
-
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Close'))
-                    df_with_inds = add_indicators(df, params)
-                    ma_col_name = 'SMA' if params.get('ma_type', 'SMA') == 'SMA' else 'EMA'
-                    if ma_col_name in df_with_inds.columns:
-                        fig.add_trace(go.Scatter(x=df_with_inds.index, y=df_with_inds[ma_col_name], name=params.get('ma_type', 'SMA')))
-                    if not trades_df.empty:
-                        # plotting: convert entry/exit dates to datetimes
-                        entries = pd.to_datetime(trades_df['entry_date'])
-                        exits = pd.to_datetime(trades_df['exit_date'])
-                        fig.add_trace(go.Scatter(x=entries, y=trades_df['entry_price'], mode='markers', name='Entries', marker=dict(symbol='triangle-up', size=10)))
-                        fig.add_trace(go.Scatter(x=exits, y=trades_df['exit_price'], mode='markers', name='Exits', marker=dict(symbol='triangle-down', size=10)))
-                    fig.update_layout(title=f'Backtest — {ticker}', xaxis_title='Date', yaxis_title='Price')
-                    st.plotly_chart(fig, use_container_width=True)
-
-                    if export_csv:
-                        csv = trades_df.to_csv(index=False).encode('utf-8')
-                        st.download_button('הורד רשימת פוזיציות (CSV)', data=csv, file_name=f'trades_{ticker}_{start_date}_{end_date}.csv', mime='text/csv')
-
-            else:
-                rsi_entry_vals = parse_range_input(rsi_entry_range, cast=int)
-                rsi_exit_vals = parse_range_input(rsi_exit_range, cast=int)
-                adx_vals = parse_range_input(adx_range, cast=int)
-                sma_vals = parse_range_input(sma_range, cast=int)
-
-                combos = list(product(rsi_entry_vals, rsi_exit_vals, adx_vals, sma_vals))
-                if len(combos) > int(max_combinations):
-                    st.error(f'נמצאו {len(combos)} קומבינציות — גבוה מהמגבלה ({max_combinations}). צמצם את הטווחים או הגדל את המגבלה.')
-                else:
-                    results = []
-                    progress = st.progress(0)
-                    for i, (r_entry, r_exit, a_val, s_val) in enumerate(combos):
-                        params = base_params.copy()
-                        params.update({'rsi_entry': r_entry, 'rsi_exit': r_exit, 'adx_threshold': a_val, 'sma_period': s_val, 'rsi_period': rsi_period, 'adx_period': adx_period, 'ma_type': ma_type})
-                        trades_df, summary = single_run_backtest(df, params)
-                        res = {
-                            'rsi_entry': r_entry,
-                            'rsi_exit': r_exit,
-                            'adx_threshold': a_val,
-                            'sma_period': s_val,
-                            'n_trades': summary.get('n_trades', 0),
-                            'compounded_return_pct': summary.get('compounded_return_pct', 0.0),
-                            'avg_trade_pct': summary.get('avg_trade_pct', 0.0),
-                            'win_rate': summary.get('win_rate', 0.0)
-                        }
-                        results.append(res)
-                        progress.progress(int((i + 1) / len(combos) * 100))
-
-                    res_df = pd.DataFrame(results)
-                    res_df = res_df.sort_values(by='compounded_return_pct', ascending=False).reset_index(drop=True)
-
-                    st.subheader('תוצאות Grid Search — סיכום קומבינציות')
-                    st.dataframe(res_df)
-
-                    top_n = min(5, len(res_df))
-                    st.markdown('### Top configurations')
-                    for k in range(top_n):
-                        row = res_df.iloc[k]
-                        st.markdown(f"**#{k+1}** — rsi_entry={row['rsi_entry']} | rsi_exit={row['rsi_exit']} | adx={row['adx_threshold']} | sma={row['sma_period']} — Compounded: {row['compounded_return_pct']:.2f}% | Trades: {int(row['n_trades'])}")
-
-                    if export_csv:
-                        csv = res_df.to_csv(index=False).encode('utf-8')
-                        st.download_button('הורד תוצאות Grid (CSV)', data=csv, file_name=f'grid_results_{ticker}_{start_date}_{end_date}.csv', mime='text/csv')
-
-                    sel_idx = st.number_input('הצג גרף עבור שורה (index) מסיכום Grid', min_value=0, max_value=max(0, len(res_df) - 1), value=0)
-                    sel = res_df.iloc[int(sel_idx)]
-                    params = base_params.copy()
-                    params.update({'rsi_entry': int(sel['rsi_entry']), 'rsi_exit': int(sel['rsi_exit']), 'adx_threshold': int(sel['adx_threshold']), 'sma_period': int(sel['sma_period']), 'ma_type': ma_type})
-                    trades_df_sel, summary_sel = single_run_backtest(df, params)
-
-                    st.markdown('### גרף עבור התצורה שנבחרה')
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Close'))
-                    df_with_inds = add_indicators(df, params)
-                    ma_col_name = 'SMA' if params.get('ma_type', 'SMA') == 'SMA' else 'EMA'
-                    if ma_col_name in df_with_inds.columns:
-                        fig.add_trace(go.Scatter(x=df_with_inds.index, y=df_with_inds[ma_col_name], name=params.get('ma_type', 'SMA')))
-                    if not trades_df_sel.empty:
-                        entries = pd.to_datetime(trades_df_sel['entry_date'])
-                        exits = pd.to_datetime(trades_df_sel['exit_date'])
-                        fig.add_trace(go.Scatter(x=entries, y=trades_df_sel['entry_price'], mode='markers', name='Entries', marker=dict(symbol='triangle-up', size=10)))
-                        fig.add_trace(go.Scatter(x=exits, y=trades_df_sel['exit_price'], mode='markers', name='Exits', marker=dict(symbol='triangle-down', size=10)))
-                    fig.update_layout(title=f'Grid Selection — {ticker}', xaxis_title='Date', yaxis_title='Price')
-                    st.plotly_chart(fig, use_container_width=True)
-
-
-st.markdown('---')
-# instructions (single-quoted string to avoid triple-quote parser issues)
-st.markdown("הנחיות: להריץ את הקוד:\n`streamlit run backtester_streamlit.py`\n\nתלויות: התקן עם:\npip install streamlit yfinance pandas numpy plotly ta")
-
-st.write('קובץ זה מוכן להרצה. אם תעדיף שאוסיף תמיכה מלאה בבחינות MACD/STOCH/ATR בתוך הלוגיקה של כניסה/יציאה — אומר לי ואוסיף.')
+# ---------- הסברים נוספים למשתמש (מתחת לאפליקציה) ----------
+st.markdown('''
+### הערות חשובות על השימוש
+- הנתונים נמשכים מ‑Yahoo Finance (בזמני שוק שונים ייתכנו מגבלות היסטוריות).
+- כל החישובים מבוססי מחיר **Adjusted Close** (יושב על Close כאשר auto_adjust=True).
+- החימום של 250 ימים משמש לחישוב אינדיקטורים — פוזיציות מדווחות רק בטווח שבחרת.
+- תמיכה בזמני מסגרת: יומי (1d) ושעתי (1h) בלבד.
+''')
