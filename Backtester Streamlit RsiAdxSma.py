@@ -208,21 +208,29 @@ def single_run_backtest(df, params):
     expected_cols = ['RSI', 'ADX', 'SMA']
     available_cols = [col for col in expected_cols if col in df.columns]
 
+    # הדפסה לצורך דיבוג – תראה אילו עמודות קיימות בפועל
+    st.write("📊 עמודות קיימות לאחר add_indicators:", list(df.columns))
+    st.write("🧩 עמודות אינדיקטורים זמינות:", available_cols)
+
+    # אם אף אחת לא קיימת – אל תנסה לנקות
     if not available_cols:
-        raise ValueError(f"לא נמצאו אינדיקטורים ב-DataFrame. העמודות הקיימות הן: {list(df.columns)}")
+        st.warning("⚠️ לא נמצאו אינדיקטורים ב-DataFrame. ייתכן שהשמות שונים או שהפונקציה add_indicators לא החזירה אותם.")
+    else:
+        # ננקה רק עמודות שקיימות בפועל
+        df = df.dropna(subset=available_cols, how='any')
 
-    # ננקה רק עמודות שקיימות בפועל
-    df = df.dropna(subset=available_cols)
-
-    # נזהה שמות נכונים (רישיות שונות)
+    # חיפוש עמודות אינדיקטור לפי תחילית (במקרה שהם בשם אחר כמו RSI_14)
     rsi_col = next((c for c in df.columns if c.lower().startswith('rsi')), None)
     adx_col = next((c for c in df.columns if c.lower().startswith('adx')), None)
     sma_col = next((c for c in df.columns if c.lower().startswith('sma')), None)
 
-    if not all([rsi_col, adx_col, sma_col]):
-        raise ValueError(f"שמות העמודות אינם תואמים: RSI={rsi_col}, ADX={adx_col}, SMA={sma_col}")
+    st.write(f"🔍 זוהו אינדיקטורים: RSI={rsi_col}, ADX={adx_col}, SMA={sma_col}")
 
-    # שליפת פרמטרים
+    if not all([rsi_col, adx_col, sma_col]):
+        st.error("❌ לא נמצאו כל שלושת האינדיקטורים הנדרשים. עצור לבדיקה.")
+        return pd.DataFrame(), {}
+
+    # פרמטרים
     rsi_entry = params.get('rsi_entry', 30)
     rsi_exit = params.get('rsi_exit', 70)
     adx_thresh = params.get('adx_thresh', 20)
@@ -240,7 +248,7 @@ def single_run_backtest(df, params):
         close_price = row['Close']
         date = row.name
 
-        # דלג על NaN
+        # דילוג על NaN
         if pd.isna(rsi_val) or pd.isna(adx_val) or pd.isna(sma_val):
             continue
 
@@ -276,6 +284,7 @@ def single_run_backtest(df, params):
         }
 
     return trades_df, summary
+
 
 
 
