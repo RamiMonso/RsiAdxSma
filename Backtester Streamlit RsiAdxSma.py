@@ -202,132 +202,180 @@ def add_indicators(df, params):
 # --------------------- Backtest logic ---------------------
 
 def single_run_backtest(df, params):
+    """
+    Backtest single run.
+    Returns: trades_df (columns in snake_case), summary dict with keys:
+      'n_trades', 'compounded_return_pct', 'avg_trade_pct', 'win_rate'
+    """
+    # ensure indicators exist
     df = add_indicators(df, params)
-
-    # המרה של כל שמות העמודות למחרוזות למניעת שגיאות .lower()
     df.columns = [str(c) for c in df.columns]
 
-    # עמודות מצופות
-    expected_cols = ['RSI', 'ADX', 'SMA']
+    # available columns debug
+    expected_cols = ['RSI', 'ADX', 'SMA', 'EMA']
     existing_cols = list(df.columns)
-
-    # נמצא רק את אלה שבאמת קיימות
-    available_cols = [col for col in expected_cols if col in existing_cols]
-
-    # הדפסה לצורך דיבוג
     st.write("📊 עמודות קיימות לאחר add_indicators:", existing_cols)
-    st.write("🧩 עמודות אינדיקטורים זמינות:", available_cols)
 
-    # נוודא שהעמודות ב־dropna קיימות באמת
-    valid_drop_cols = [col for col in available_cols if col in df.columns]
-
+    # dropna on the indicators that exist
+    valid_drop_cols = [c for c in ['RSI', 'ADX'] if c in df.columns]
     if valid_drop_cols:
         df = df.dropna(subset=valid_drop_cols, how='any')
     else:
         st.warning("⚠️ לא נמצאו אינדיקטורים לניקוי ערכים חסרים – ממשיך בלי dropna().")
 
-    # חיפוש דינמי של אינדיקטורים (ממיר כל שם עמודה למחרוזת ובודק תחילית)
-    rsi_col = next((str(c) for c in df.columns if str(c).lower().startswith('rsi')), None)
-    adx_col = next((str(c) for c in df.columns if str(c).lower().startswith('adx')), None)
-    sma_col = next((str(c) for c in df.columns if str(c).lower().startswith('sma')), None)
+    # dynamic column discovery
+    rsi_col = next((c for c in df.columns if str(c).lower().startswith('rsi')), None)
+    adx_col = next((c for c in df.columns if str(c).lower().startswith('adx')), None)
+    sma_col = 'SMA' if 'SMA' in df.columns else None
+    ema_col = 'EMA' if 'EMA' in df.columns else None
 
-    st.write(f"🔍 זוהו אינדיקטורים: RSI={rsi_col}, ADX={adx_col}, SMA={sma_col}")
+    st.write(f"🔍 זוהו אינדיקטורים: RSI={rsi_col}, ADX={adx_col}, SMA={sma_col}, EMA={ema_col}")
 
-    # אם אחד חסר – נעצור בצורה בטוחה
-    if not all([rsi_col, adx_col, sma_col]):
-        st.error("❌ לא נמצאו כל שלושת האינדיקטורים הנדרשים. בדוק את add_indicators.")
+    # require at least RSI, ADX and one of SMA/EMA
+    if not (rsi_col and adx_col and (sma_col or ema_col)):
+        st.error("❌ דרושים RSI, ADX ואחת מה-SMA/EMA. בדוק את add_indicators.")
         return pd.DataFrame(), {}
 
-    # פרמטרים
-    rsi_entry = params.get('rsi_entry', 30)
-    rsi_exit = params.get('rsi_exit', 70)
-    adx_thresh = params.get('adx_thresh', 20)
+    # params (use consistent names)
+    rsi_entry = float(params.get('rsi_entry', 30.0))
+    rsi_exit = float(params.get('rsi_exit', 70.0))
+    adx_threshold = float(params.get('adx_threshold', params.get('adx_thresh', 20.0)))  # accept both keys defensively
+    ma_type = params.get('ma_type', 'SMA')
+    use_ma = bool(params.get('use_sma', True))
+    close_open_on_run = bool(params.get('close_open_on_run', True))
+
+    # fees
+    fee_type = params.get('fee_type', 'none')
+    fee_value = float(params.get('fee_value', 0.0))
+    fee_percent = float(params.get('fee_percent', 0.0))
 
     trades = []
     in_position = False
     entry_price = None
     entry_date = None
+    entry_meta = {}
 
+    # iterate rows
     for i in range(len(df)):
         row = df.iloc[i]
-        rsi_val = row[rsi_col]
-        adx_val = row[adx_col]
-        sma_val = row[sma_col]
-        close_price = row['Close']
         date = row.name
+        close_price = row.get('Close', np.nan)
+        rsi_val = row.get(rsi_col, np.nan)
+        adx_val = row.get(adx_col, np.nan)
 
-        # דילוג על NaN
-        if pd.isna(rsi_val) or pd.isna(adx_val) or pd.isna(sma_val):
+        # choose MA value based on ma_type and availability
+        ma_val = None
+        if ma_type == 'EMA' and ema_col:
+            ma_val = row.get(ema_col, np.nan)
+        elif sma_col:
+            ma_val = row.get(sma_col, np.nan)
+
+        # skip rows with NaN essential values
+        if pd.isna(rsi_val) or pd.isna(adx_val) or pd.isna(close_price) or (use_ma and pd.isna(ma_val)):
             continue
 
-        # תנאי כניסה
-        if (not in_position) and (rsi_val < rsi_entry) and (adx_val > adx_thresh) and (close_price > sma_val):
-            in_position = True
-            entry_price = close_price
-            entry_date = date
+        # entry condition: RSI below entry, ADX above threshold, and price > MA (if enabled)
+        entry_cond = (not in_position) and (rsi_val < rsi_entry) and (adx_val > adx_threshold)
+        if use_ma:
+            entry_cond = entry_cond and (close_price > ma_val)
 
-        # תנאי יציאה
-        elif in_position and (rsi_val > rsi_exit or close_price < sma_val):
-            exit_price = close_price
-            exit_date = date
-            profit = (exit_price - entry_price) / entry_price * 100
+        if entry_cond:
+            in_position = True
+            entry_price = float(close_price)
+            entry_date = date
+            # capture entry indicators for later reporting
+            entry_meta = {
+                'entry_rsi': float(rsi_val),
+                'entry_adx': float(adx_val),
+                'entry_ma': float(ma_val) if ma_val is not None else np.nan
+            }
+            continue
+
+        # exit condition: if in position and RSI > exit OR price < MA (break MA)
+        if in_position:
+            exit_cond = (rsi_val > rsi_exit) or (use_ma and (close_price < ma_val))
+            if exit_cond:
+                exit_price = float(close_price)
+                exit_date = date
+                raw_profit_pct = (exit_price / entry_price - 1) * 100.0 if entry_price != 0 else 0.0
+
+                # store raw values; fee application done after building DataFrame
+                trades.append({
+                    'entry_date': entry_date,
+                    'exit_date': exit_date,
+                    'entry_price': entry_price,
+                    'exit_price': exit_price,
+                    'raw_profit_pct': raw_profit_pct,
+                    'entry_rsi': entry_meta.get('entry_rsi', np.nan),
+                    'entry_adx': entry_meta.get('entry_adx', np.nan),
+                    'entry_ma': entry_meta.get('entry_ma', np.nan)
+                })
+                in_position = False
+                entry_price = None
+                entry_date = None
+                entry_meta = {}
+
+    # optionally close open position at the last available price
+    if in_position and close_open_on_run:
+        last_row = df.iloc[-1]
+        last_price = float(last_row.get('Close', np.nan))
+        if not pd.isna(last_price) and entry_price is not None:
+            exit_price = last_price
+            exit_date = df.index[-1]
+            raw_profit_pct = (exit_price / entry_price - 1) * 100.0 if entry_price != 0 else 0.0
             trades.append({
-                'Entry Date': entry_date,
-                'Exit Date': exit_date,
-                'Entry Price': entry_price,
-                'Exit Price': exit_price,
-                'Profit %': profit
+                'entry_date': entry_date,
+                'exit_date': exit_date,
+                'entry_price': entry_price,
+                'exit_price': exit_price,
+                'raw_profit_pct': raw_profit_pct,
+                'entry_rsi': entry_meta.get('entry_rsi', np.nan),
+                'entry_adx': entry_meta.get('entry_adx', np.nan),
+                'entry_ma': entry_meta.get('entry_ma', np.nan)
             })
             in_position = False
 
     trades_df = pd.DataFrame(trades)
-    summary = {}
 
-    if not trades_df.empty:
-        summary = {
-            'Total Trades': len(trades_df),
-            'Win Rate %': (trades_df['Profit %'] > 0).mean() * 100,
-            'Avg Profit %': trades_df['Profit %'].mean(),
-            'Total Return %': trades_df['Profit %'].sum()
-        }
+    # if empty -> return empty consistent summary
+    if trades_df.empty:
+        summary = {'n_trades': 0, 'compounded_return_pct': 0.0, 'avg_trade_pct': 0.0, 'win_rate': 0.0}
+        return trades_df, summary
 
-    return trades_df, summary
-
-
-
-
-
-
-    fee_type = params.get('fee_type','none')
-    fee_value = float(params.get('fee_value',0))
-    fee_percent = float(params.get('fee_percent',0))
-
-    def profit_after_fees(row):
-        e = row['entry_price']
-        x = row['exit_price']
+    # apply fees and compute profit after fees per trade
+    def profit_after_fees_row(row):
+        e = float(row['entry_price'])
+        x = float(row['exit_price'])
         if fee_type == 'absolute':
-            total_fee = fee_value * 2
-            profit = (x - e - total_fee) / e * 100
+            total_fee = fee_value * 2.0  # entry + exit
+            profit = (x - e - total_fee) / e * 100.0 if e != 0 else 0.0
         elif fee_type == 'percent':
-            cost = e * (1 + fee_percent/100)
-            proceeds = x * (1 - fee_percent/100)
-            profit = (proceeds / cost - 1) * 100
+            cost = e * (1.0 + fee_percent / 100.0)
+            proceeds = x * (1.0 - fee_percent / 100.0)
+            profit = (proceeds / cost - 1.0) * 100.0 if cost != 0 else 0.0
         else:
-            profit = (x / e - 1) * 100
+            profit = (x / e - 1.0) * 100.0 if e != 0 else 0.0
         return profit
 
-    trades_df['profit_pct'] = trades_df.apply(profit_after_fees, axis=1)
+    trades_df['profit_pct'] = trades_df.apply(profit_after_fees_row, axis=1)
     trades_df['win'] = trades_df['profit_pct'] > 0
 
-    capital = float(params.get('capital',1000.0))
+    # compounded return (per_trade mode assumed by default; UI handles modes)
+    capital = float(params.get('capital', 1000.0))
     cap = capital
-    for p in trades_df['profit_pct']:
-        cap = cap * (1 + p/100)
-    compounded_return_pct = (cap - capital) / capital * 100
+    for p in trades_df['profit_pct'].fillna(0.0):
+        cap = cap * (1.0 + float(p) / 100.0)
+    compounded_return_pct = (cap - capital) / capital * 100.0 if capital != 0 else 0.0
 
-    summary = {'n_trades': len(trades_df), 'compounded_return_pct': compounded_return_pct, 'avg_trade_pct': trades_df['profit_pct'].mean(), 'win_rate': trades_df['win'].mean()}
+    summary = {
+        'n_trades': len(trades_df),
+        'compounded_return_pct': compounded_return_pct,
+        'avg_trade_pct': float(trades_df['profit_pct'].mean()),
+        'win_rate': float(trades_df['win'].mean())
+    }
 
     return trades_df, summary
+
 
 # --------------------- Grid utilities & UI ---------------------
 
