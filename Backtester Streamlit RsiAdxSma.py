@@ -184,16 +184,16 @@ with st.sidebar.form('settings'):
     st.subheader('אינדיקטורים')
     rsi_period = st.number_input('RSI — מספר תקופות', min_value=2, max_value=200, value=14)
     adx_period = st.number_input('ADX — מספר תקופות', min_value=2, max_value=200, value=14)
-    sma_period = st.number_input('SMA — מספר תקופות', min_value=2, max_value=500, value=50)
+    sma_period = st.number_input('SMA — מספר תקופות', min_value=2, max_value=500, value=200)
 
-    rsi_entry_thresh = st.number_input('סף RSI לכניסה (≤)', min_value=1, max_value=100, value=30)
-    rsi_exit_thresh = st.number_input('סף RSI ליציאה (≥)', min_value=1, max_value=100, value=50)
+    rsi_entry_thresh = st.number_input('סף RSI לכניסה (≤)', min_value=1, max_value=100, value=40)
+    rsi_exit_thresh = st.number_input('סף RSI ליציאה (≥)', min_value=1, max_value=100, value=60)
     adx_thresh = st.number_input('סף ADX לכניסה (≤)', min_value=1, max_value=100, value=25)
 
     include_rsi = st.checkbox('להשתמש ב-RSI?', value=True)
     include_adx = st.checkbox('להשתמש ב-ADX?', value=True)
     include_sma = st.checkbox('להשתמש ב-SMA?', value=True)
-    check_not_strong_down = st.checkbox('לבדוק שה-SMA לא יורד לעומת יום קודם?', value=True)
+    check_not_strong_down = st.checkbox('לבדוק שה-SMA לא יורד לעומת יום קודם?', value=false)
 
     st.subheader('מסחר & מימון')
     fractional_shares = st.checkbox('לאפשר רכישת שברי מניה?', value=True)
@@ -204,9 +204,9 @@ with st.sidebar.form('settings'):
 
     st.subheader('עמלות')
     commission_type = st.selectbox('סוג עמלה', options=['אחוז', 'סכום'], index=0)
-    commission_value = st.number_input('ערך עמלה (למשל: 0.1 עבור 0.1% או 2 עבור 2 ש"ח)', min_value=0.0, value=0.1)
+    commission_value = st.number_input('ערך עמלה (למשל: 0.1 עבור 0.1% או 2 עבור 2 ש"ח)', min_value=0.0, value=0)
 
-    exec_mode = st.radio('מתי לבצע ביצוע כאשר התנאי מתקיים', options=['ביום האותן', 'ביום המסחר הבא'], index=0)
+    exec_mode = st.radio('מתי לבצע ביצוע כאשר התנאי מתקיים', options=['ביום הסגירה', 'ביום המסחר הבא'], index=0)
     execute_next_day = (exec_mode == 'ביום המסחר הבא')
 
     close_open_at_run = st.checkbox('לסגור פוזיציה פתוחה לפי מחיר יום ההרצה (אם קיימת)', value=True)
