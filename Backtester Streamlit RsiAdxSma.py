@@ -1,5 +1,5 @@
 # streamlit_backtester_rsi_adx.py
-# Backtester RSI + ADX + SMA — כולל duration_days ו-win-rate
+# Backtester RSI + ADX + SMA — כולל duration_days, win-rate, ו-תשואה כוללת לפי סוג השקעה
 # שמור והרץ: streamlit run streamlit_backtester_rsi_adx.py
 
 import streamlit as st
@@ -193,7 +193,7 @@ with st.sidebar.form('settings'):
     fractional_shares = st.checkbox('לאפשר רכישת שברי מניה?', value=True)
     capital = st.number_input('הון התחלתי', min_value=1.0, value=10000.0, step=100.0)
 
-    invest_mode = st.radio('שיטת השקעה לכל עסקה', options=['סכום קבוע לכל עסקה', 'הון ראשוני + ריבית דריבית'], index=0)
+    invest_mode = st.radio('שיטת השקעה لكل עסקה', options=['סכום קבוע לכל עסקה', 'הון ראשוני + ריבית דריבית'], index=0)
     fixed_invest_amount = st.number_input('סכום להשקעה בכל עסקה (כשבחרת סכום קבוע)', min_value=1.0, value=1000.0, step=100.0)
 
     st.subheader('עמלות')
@@ -484,11 +484,20 @@ if submit:
                 wins = int((trades_df['net_PL'] > 0).sum()) if total_trades>0 else 0
                 win_rate = (wins / total_trades) * 100 if total_trades>0 else 0.0
 
-                c1, c2, c3, c4 = st.columns(4)
+                # חישוב תשואה כוללת בהתאם למצב ההשקעה (final_equity מול הון התחלתי)
+                final_equity = float(res.get('final_equity', 0.0))
+                initial_cap = float(capital)
+                total_return_pct = ((final_equity - initial_cap) / initial_cap * 100) if initial_cap != 0 else 0.0
+
+                # הצגה במסך (עכשיו 5 מדדים)
+                c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric('סה״כ רווח נקי', f"{res['total_net']:.2f}")
                 c2.metric('סה״כ רווח ברוטו', f"{res['total_gross']:.2f}")
                 c3.metric('סה״כ עמלות', f"{res['total_commissions']:.2f}")
-                c4.metric('אחוזי ביצוע', f"{win_rate:.2f}%")
+                c4.metric('אחוזי ביצוע (Win Rate)', f"{win_rate:.2f}%")
+                # תצוגת תשואה כוללת לפי מצב ההשקעה
+                # הערה למשתמש: בחישוב זה נלקח final_equity שהתקבל מהמודל המדמה את שיטת ההשקעה (קבוע/כריבית דריבית).
+                c5.metric('תשואה כוללת (%)', f"{total_return_pct:.2f}%")
 
             st.subheader('גרף מחיר — כניסות ויציאות')
             price_df = res['price_df'].reset_index().rename(columns={'index': 'Date'})
@@ -569,7 +578,7 @@ if submit:
 
 st.markdown('''
 **הערות חשובות:**  
-- הוספתי `duration_days` לכל עסקה (חישוב כולל: כניסה ויציאה באותו יום = 1).  
-- הוספתי מדד 'אחוזי ביצוע' (Win Rate) בסיכום הביצועים.  
-- כל שאר הפונקציות והלוגיקה נשמרו כפי שהיו.
+- הוספתי תצוגת 'תשואה כוללת (%)' שמייצגת את השינוי באקוויטי (final_equity) מול ההון ההתחלתי שהוקלד ב-UI.  
+- החישוב מתאים לשתי השיטות: 'סכום קבוע לכל עסקה' ו־'הון ראשוני + ריבית דריבית' — מאחר שהמודל כבר מעדכן את `equity` לפי השיטה הנבחרת, אנו פשוט משווים את `final_equity` ל־`capital`.  
+- כל שאר הלוגיקה והפונקציות נשמרו בדיוק כפי שהיו.
 ''')
