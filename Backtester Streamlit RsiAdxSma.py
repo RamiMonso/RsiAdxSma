@@ -2,6 +2,7 @@
 # Streamlit backtester with extended indicators + grid search using `ta` library
 # Updated: user-selectable indicator participation in strategy (entry/exit),
 # MACD/Stochastic/ATR participation, thresholds, and Grid Search.
+# Fixed: proper multiline strings at the end to avoid SyntaxError.
 # Dependencies: pip install streamlit yfinance pandas numpy plotly reportlab ta
 
 import streamlit as st
@@ -9,11 +10,8 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import io
-import base64
 from datetime import datetime
 import plotly.graph_objects as go
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
 from itertools import product
 
 # TA indicators
@@ -523,12 +521,17 @@ if run_button:
                     fig.update_layout(title=f'Grid Selection — {ticker}', xaxis_title='Date', yaxis_title='Price')
                     st.plotly_chart(fig, use_container_width=True)
 
+# --------------------- Footer / Instructions ---------------------
 st.markdown('---')
-st.markdown('---')
-st.write(
-    "הנחיות: להריץ את הקוד: `streamlit run backtester_streamlit.py`.\n\n"
-    "תלויות: התקן עם:\n`pip install -r requirements.txt`"
+st.markdown(
+    """הנחיות: להריץ את הקוד:
+`streamlit run backtester_streamlit.py`
+
+תלויות: התקן עם:
+```
+pip install -r requirements.txt
+```
+"""
 )
 
-
-תלויות: `pip install streamlit yfinance pandas numpy plotly reportlab ta`')
+st.write('קובץ זה מוכן להרצה. אם תרצה שאעדכן Grid Search לכלול גם פרמטרים ל-MACD/STOCH/ATR — אמור לי ואוסיף.')
