@@ -1,46 +1,50 @@
 # streamlit_backtester_rsi_adx.py
-# אפליקציית Streamlit לבחינת אסטרטגיות RSI + ADX + SMA
-# משולבת חישובי RSI/ADX פנימיים — אין תלות ב-pandas_ta
-# הוראות: שמור כקובץ והריץ `streamlit run streamlit_backtester_rsi_adx.py`
+# Backtester — RSI + ADX + SMA
+# גרסה עם fallback אם matplotlib אינו מותקן.
+# שמור והרץ: streamlit run streamlit_backtester_rsi_adx.py
 
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
 from io import BytesIO
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title='Backtester RSI+ADX+SMA', layout='wide')
 
+# ניסיון לטעון matplotlib — אם לא קיים, נפעל ב-fallback
+MATPLOTLIB_AVAILABLE = True
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+except Exception:
+    MATPLOTLIB_AVAILABLE = False
+
+# ניסיון לטעון altair לשימוש חלופי בציורים (Streamlit בדרך כלל תומכת ב-altair)
+ALT_AVAILABLE = True
+try:
+    import altair as alt
+except Exception:
+    ALT_AVAILABLE = False
+
 # ----------------------- פונקציות אינדיקטורים פנימיות -----------------------
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """RSI לפי Wilder (EMA smoothing approximation)."""
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    # Wilder smoothing using ewm with alpha=1/period and adjust=False
     avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
     rs = avg_gain / (avg_loss.replace(0, np.nan))
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(0)
-    return rsi
+    return rsi.fillna(0)
 
 def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """
-    ADX approximation using Wilder smoothing:
-    returns ADX series (0..100)
-    """
-    # True Range (TR)
     prev_close = close.shift(1)
     tr1 = high - low
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-    # Directional Movement
     up_move = high - high.shift(1)
     down_move = low.shift(1) - low
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
@@ -48,7 +52,6 @@ def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int =
     plus_dm = pd.Series(plus_dm, index=high.index)
     minus_dm = pd.Series(minus_dm, index=high.index)
 
-    # Wilder smoothing (approx via ewm with alpha=1/period)
     atr = tr.ewm(alpha=1/period, adjust=False).mean()
     smooth_plus = plus_dm.ewm(alpha=1/period, adjust=False).mean()
     smooth_minus = minus_dm.ewm(alpha=1/period, adjust=False).mean()
@@ -56,15 +59,12 @@ def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int =
     plus_di = 100 * (smooth_plus / atr)
     minus_di = 100 * (smooth_minus / atr)
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-
     adx = dx.ewm(alpha=1/period, adjust=False).mean()
-    adx = adx.fillna(0)
-    return adx
+    return adx.fillna(0)
 
 # ----------------------- עזרי מערכת -----------------------
 def download_price_data(ticker, start_date, end_date, interval, warmup_days):
     start_fetch = pd.to_datetime(start_date) - pd.Timedelta(days=warmup_days)
-    # auto_adjust=True כדי לקבל Adjusted Close דרך 'Close'
     df = yf.download(ticker,
                      start=start_fetch.strftime('%Y-%m-%d'),
                      end=(pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d'),
@@ -80,7 +80,6 @@ def calc_commission(value, commission_type, commission_value):
     if commission_value == 0:
         return 0.0
     if commission_type == 'אחוז מכל עסקה':
-        # commission_value is percent (e.g. 0.1 means 0.1%)
         return value * (commission_value / 100.0)
     else:
         return commission_value
@@ -88,6 +87,10 @@ def calc_commission(value, commission_type, commission_value):
 # ----------------------- ממשק משתמש -----------------------
 st.title('Backtester — בדיקת אסטרטגיות RSI + ADX + SMA')
 st.caption('נתוני Adjusted Close מ-Yahoo Finance | חימום אינדיקטורים: 250 ימי מסחר')
+
+if not MATPLOTLIB_AVAILABLE:
+    st.warning('שימו לב: matplotlib לא מותקן בסביבה. תכונות הורדת PNG וייצוא PDF מושבתות עד להתקנת matplotlib.\n'
+               'להתקנה: `pip install matplotlib` ואז להפעיל מחדש את האפליקציה.')
 
 with st.sidebar.form('settings'):
     st.header('הגדרות')
@@ -134,7 +137,7 @@ with st.sidebar.form('settings'):
     close_open_at_run = st.checkbox('לסגור פוזיציה פתוחה לפי מחיר יום ההרצה (אם קיימת)', value=True)
 
     enable_excel = st.checkbox('אפשרות ייצוא ל-Excel', value=True)
-    enable_pdf = st.checkbox('אפשרות ייצוא ל-PDF', value=True)
+    enable_pdf = st.checkbox('אפשרות ייצוא ל-PDF', value=True)  # יושבת אוטומטית אם matplotlib לא נמצא
 
     warmup_days = 250
     st.caption(f'חימום אינדיקטורים: {warmup_days} ימי מסחר')
@@ -156,7 +159,6 @@ if submit:
                     st.error(f'לא נמצאו נתונים עבור {ticker}. בדוק טיקר / טיימפריים.')
                     continue
 
-                # חישוב אינדיקטורים
                 df = df.copy()
                 if include_rsi:
                     df['RSI'] = compute_rsi(df['Close'], period=rsi_period)
@@ -173,7 +175,6 @@ if submit:
                 else:
                     df[f'SMA_{sma_period}'] = np.nan
 
-                # טווח סריקה (מתחיל ב-start_date)
                 scan_df = df.loc[str(start_date):str(end_date)].copy()
                 scan_df = scan_df.dropna(subset=['Close'])
                 if scan_df.empty:
@@ -187,12 +188,8 @@ if submit:
                 cumulative_equity = []
                 idx_list = list(scan_df.index)
 
-                # Buy & Hold start and end
-                bh_start_price = None
-                bh_end_price = None
-                if len(idx_list) > 0:
-                    bh_start_price = scan_df.iloc[0]['Close']
-                    bh_end_price = scan_df.iloc[-1]['Close']
+                bh_start_price = scan_df.iloc[0]['Close'] if len(idx_list)>0 else None
+                bh_end_price = scan_df.iloc[-1]['Close'] if len(idx_list)>0 else None
 
                 for i, current_date in enumerate(idx_list):
                     row = scan_df.loc[current_date]
@@ -201,7 +198,6 @@ if submit:
                     adx_v = row.get('ADX', np.nan)
                     sma_v = row.get(f'SMA_{sma_period}', np.nan)
 
-                    # ENTRY conditions
                     entry_cond = True
                     if include_rsi:
                         entry_cond = entry_cond and (not np.isnan(rsi_v)) and (rsi_v <= rsi_entry_thresh)
@@ -232,7 +228,6 @@ if submit:
                             if not fractional_shares:
                                 quantity = np.floor(quantity)
                                 if quantity <= 0:
-                                    # לא ניתן לקנות מניה שלמה במחיר זה
                                     continue
 
                             entry_comm = calc_commission(invest_amount, commission_type, commission_value)
@@ -250,7 +245,6 @@ if submit:
                             }
                             in_position = True
 
-                    # EXIT logic when in position
                     if in_position:
                         exit_cond = True
                         if include_rsi:
@@ -296,7 +290,6 @@ if submit:
 
                     cumulative_equity.append(equity)
 
-                # טיפול בפוזיציה פתוחה בסוף הסקירה
                 if in_position:
                     last_date = idx_list[-1]
                     last_price = scan_df.loc[last_date, 'Close']
@@ -332,7 +325,6 @@ if submit:
                         })
                         in_position = False
 
-                # Buy & Hold comparison
                 if bh_start_price is not None:
                     bh_shares = capital / bh_start_price
                     bh_gross = (bh_end_price - bh_start_price) * bh_shares
@@ -379,27 +371,68 @@ if submit:
                 col3.metric('סה"כ עמלות ששולמו', f"{res['total_commissions']:.2f}")
 
             st.subheader('גרף מחיר — כניסות ויציאות')
-            price_df = res['price_df']
-            fig, ax = plt.subplots(figsize=(12, 5))
-            ax.plot(price_df.index, price_df['Close'], label='מחיר (Adjusted Close)')
-            if f'SMA_{sma_period}' in price_df.columns:
-                ax.plot(price_df.index, price_df[f'SMA_{sma_period}'], label=f'SMA {sma_period}')
+            price_df = res['price_df'].reset_index().rename(columns={'index': 'Date'})
+            price_df['Date'] = pd.to_datetime(price_df['Date'])
 
-            if not trades_df.empty:
-                for _, t in trades_df.iterrows():
-                    try:
-                        ed = pd.to_datetime(t['entry_date'])
-                        xd = pd.to_datetime(t['exit_date'])
-                        ax.scatter(ed, t['entry_price'], marker='^', s=100)
-                        ax.scatter(xd, t['exit_price'], marker='v', s=100)
-                    except Exception:
-                        pass
+            # אם יש matplotlib זמין — נשתמש בו (וגם נאפשר הורדת PNG/PDF)
+            if MATPLOTLIB_AVAILABLE:
+                fig, ax = plt.subplots(figsize=(12, 5))
+                ax.plot(price_df['Date'], price_df['Close'], label='מחיר (Adjusted Close)')
+                if f'SMA_{sma_period}' in res['price_df'].columns:
+                    ax.plot(price_df['Date'], price_df[f'SMA_{sma_period}'], label=f'SMA {sma_period}')
+                if not trades_df.empty:
+                    for _, t in trades_df.iterrows():
+                        try:
+                            ed = pd.to_datetime(t['entry_date'])
+                            xd = pd.to_datetime(t['exit_date'])
+                            ax.scatter(ed, t['entry_price'], marker='^', s=100, c='green')
+                            ax.scatter(xd, t['exit_price'], marker='v', s=100, c='red')
+                        except Exception:
+                            pass
+                ax.set_title(f'{ticker} — Price with entries/exits')
+                ax.legend()
+                st.pyplot(fig)
 
-            ax.set_title(f'{ticker} — Price with entries/exits')
-            ax.legend()
-            st.pyplot(fig)
+                # הורדת PNG
+                buf = BytesIO()
+                fig.savefig(buf, format='png', bbox_inches='tight')
+                buf.seek(0)
+                st.download_button(label='הורד גרף PNG', data=buf, file_name=f'{ticker}_chart.png', mime='image/png')
 
-            # הורדות
+                # הורדת PDF (גרף + טבלה)
+                if enable_pdf and not trades_df.empty:
+                    pdf_bytes = BytesIO()
+                    with PdfPages(pdf_bytes) as pdf:
+                        pdf.savefig(fig)
+                        fig_table, ax_table = plt.subplots(figsize=(12, 6))
+                        ax_table.axis('off')
+                        tbl = ax_table.table(cellText=trades_df.round(4).values, colLabels=trades_df.columns, loc='center')
+                        tbl.auto_set_font_size(False)
+                        tbl.set_fontsize(8)
+                        tbl.scale(1, 1.5)
+                        pdf.savefig(fig_table)
+                        plt.close(fig_table)
+                    pdf_bytes.seek(0)
+                    st.download_button(label='הורד דוח PDF', data=pdf_bytes, file_name=f'{ticker}_report.pdf', mime='application/pdf')
+
+            else:
+                # Fallback: השתמש ב-altair אם קיים, אחרת ב-st.line_chart פשוט
+                if ALT_AVAILABLE:
+                    base = alt.Chart(price_df).encode(x='Date:T')
+                    line = base.mark_line().encode(y='Close:Q', tooltip=['Date:T','Close:Q'])
+                    charts = [line]
+                    if f'SMA_{sma_period}' in res['price_df'].columns:
+                        sma_df = price_df[[ 'Date', f'SMA_{sma_period}']].rename(columns={f'SMA_{sma_period}':'SMA'})
+                        charts.append(alt.Chart(sma_df).mark_line(strokeDash=[4,2]).encode(x='Date:T', y='SMA:Q'))
+                    chart = alt.layer(*charts).interactive()
+                    st.altair_chart(chart, use_container_width=True)
+                else:
+                    st.line_chart(price_df.set_index('Date')['Close'])
+
+                if not MATPLOTLIB_AVAILABLE:
+                    st.info('ללא matplotlib לא ניתן להוריד PNG/PDF מתוך האפליקציה. התקן matplotlib (`pip install matplotlib`) כדי להפעיל יכולות הורדה אלה.')
+
+            # הורדת Excel תמיד זמינה אם יש עסקאות
             if enable_excel and not trades_df.empty:
                 towrite = BytesIO()
                 with pd.ExcelWriter(towrite, engine='xlsxwriter') as writer:
@@ -408,27 +441,6 @@ if submit:
                 towrite.seek(0)
                 st.download_button(label='הורד דוח Excel (.xlsx)', data=towrite, file_name=f'{ticker}_backtest.xlsx',
                                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-
-            if enable_pdf and not trades_df.empty:
-                pdf_bytes = BytesIO()
-                with PdfPages(pdf_bytes) as pdf:
-                    pdf.savefig(fig)
-                    # טבלה כתרשים matplotlib
-                    fig_table, ax_table = plt.subplots(figsize=(12, 6))
-                    ax_table.axis('off')
-                    tbl = ax_table.table(cellText=trades_df.round(4).values, colLabels=trades_df.columns, loc='center')
-                    tbl.auto_set_font_size(False)
-                    tbl.set_fontsize(8)
-                    tbl.scale(1, 1.5)
-                    pdf.savefig(fig_table)
-                    plt.close(fig_table)
-                pdf_bytes.seek(0)
-                st.download_button(label='הורד דוח PDF', data=pdf_bytes, file_name=f'{ticker}_report.pdf', mime='application/pdf')
-
-            buf = BytesIO()
-            fig.savefig(buf, format='png', bbox_inches='tight')
-            buf.seek(0)
-            st.download_button(label='הורד גרף PNG', data=buf, file_name=f'{ticker}_chart.png', mime='image/png')
 
             if ticker in bh_comparison:
                 st.subheader('השוואה ל-Buy & Hold')
@@ -442,7 +454,7 @@ if submit:
 
 st.markdown('''
 ### הערות
-- הקוד מחשב RSI ו-ADX פנימית (אין צורך ב-pandas_ta).
-- נתונים אינטרדיים (שעתי) מה-Yahoo מוגבלים לזמני טווח היסטוריים — אם לא מוצאים נתונים שעתי נסה טווח קצר יותר.
-- חימום אינדיקטורים: 250 יום לפני התאריך התחלה לחישוב יציב.
+- אם ברצונך לאפשר הורדת PNG וייצוא PDF יש להתקין את matplotlib: `pip install matplotlib`
+- לחלופות גרפיות השתמשתי ב-altair/streamlit כאשר matplotlib לא זמין.
+- אם תרצה, אוכל לשלוח לך גרסה שמכילה רק הודעות שגיאה יותר מפורטות או גרסה שמכילה בדיקות יחידה (unit tests).
 ''')
