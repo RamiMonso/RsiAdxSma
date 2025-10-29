@@ -204,7 +204,7 @@ with st.sidebar.form('settings'):
 
     st.subheader('עמלות')
     commission_type = st.selectbox('סוג עמלה', options=['אחוז', 'סכום'], index=0)
-    commission_value = st.number_input('ערך עמלה (למשל: 0.1 עבור 0.1% או 2 עבור 2 ש"ח)', min_value=0.0, value=0)
+    commission_value = st.number_input('ערך עמלה (למשל: 0.1 עבור 0.1% או 2 עבור 2 ש"ח)', min_value=0.0, value=0.0)
 
     exec_mode = st.radio('מתי לבצע ביצוע כאשר התנאי מתקיים', options=['ביום הסגירה', 'ביום המסחר הבא'], index=0)
     execute_next_day = (exec_mode == 'ביום המסחר הבא')
