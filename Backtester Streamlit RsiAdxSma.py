@@ -193,7 +193,7 @@ with st.sidebar.form('settings'):
     include_rsi = st.checkbox('להשתמש ב-RSI?', value=True)
     include_adx = st.checkbox('להשתמש ב-ADX?', value=True)
     include_sma = st.checkbox('להשתמש ב-SMA?', value=True)
-    check_not_strong_down = st.checkbox('לבדוק שה-SMA לא יורד לעומת יום קודם?', value=false)
+    check_not_strong_down = st.checkbox('לבדוק שה-SMA לא יורד לעומת יום קודם?', value=False)
 
     st.subheader('מסחר & מימון')
     fractional_shares = st.checkbox('לאפשר רכישת שברי מניה?', value=True)
