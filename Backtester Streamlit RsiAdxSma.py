@@ -1,5 +1,5 @@
 # streamlit_backtester_rsi_adx.py
-# Backtester RSI + ADX + SMA — כולל duration_days, win-rate, ו-תשואה כוללת לפי סוג השקעה
+# Backtester RSI + ADX + SMA — גרסה עם ברירות מחדל מעודכנות לפי בקשת המשתמש
 # שמור והרץ: streamlit run streamlit_backtester_rsi_adx.py
 
 import streamlit as st
@@ -162,7 +162,7 @@ def calc_commission(value: float, commission_type: str, commission_value: float)
     else:
         return commission_value
 
-# ---------------------- UI — הגדרות משתמש ----------------------
+# ---------------------- UI — הגדרות משתמש (ברירות מחדל מעודכנות) ----------------------
 with st.sidebar.form('settings'):
     st.header('הגדרות בדיקה')
     tickers_input = st.text_input('טיקר (או רשימת טיקרים, מופרדים בפסיקים)', value='AAPL')
@@ -171,17 +171,19 @@ with st.sidebar.form('settings'):
     timeframe = st.selectbox('פרק זמן', options=['1d', '1h'], index=0, format_func=lambda x: 'יומי' if x=='1d' else 'שעתי')
     col1, col2 = st.columns(2)
     with col1:
-        start_date = st.date_input('תאריך התחלה', value=(datetime.today() - timedelta(days=365)).date())
+        # ברירת מחדל: תחילת השנה הנוכחית
+        start_date = st.date_input('תאריך התחלה', value=datetime(datetime.today().year, 1, 1).date())
     with col2:
         end_date = st.date_input('תאריך סוף', value=datetime.today().date())
 
     st.subheader('אינדיקטורים')
+    # ברירות מחדל מעודכנות
     rsi_period = st.number_input('RSI — מספר תקופות', min_value=2, max_value=200, value=14)
     adx_period = st.number_input('ADX — מספר תקופות', min_value=2, max_value=200, value=14)
-    sma_period = st.number_input('SMA — מספר תקופות', min_value=2, max_value=500, value=50)
+    sma_period = st.number_input('SMA — מספר תקופות', min_value=2, max_value=500, value=200)
 
-    rsi_entry_thresh = st.number_input('סף RSI לכניסה (≤)', min_value=1, max_value=100, value=30)
-    rsi_exit_thresh = st.number_input('סף RSI ליציאה (≥)', min_value=1, max_value=100, value=50)
+    rsi_entry_thresh = st.number_input('סף RSI לכניסה (≤)', min_value=1, max_value=100, value=40)
+    rsi_exit_thresh = st.number_input('סף RSI ליציאה (≥)', min_value=1, max_value=100, value=60)
     adx_thresh = st.number_input('סף ADX לכניסה (≤)', min_value=1, max_value=100, value=25)
 
     include_rsi = st.checkbox('להשתמש ב-RSI?', value=True)
@@ -193,12 +195,13 @@ with st.sidebar.form('settings'):
     fractional_shares = st.checkbox('לאפשר רכישת שברי מניה?', value=True)
     capital = st.number_input('הון התחלתי', min_value=1.0, value=10000.0, step=100.0)
 
-    invest_mode = st.radio('שיטת השקעה لكل עסקה', options=['סכום קבוע לכל עסקה', 'הון ראשוני + ריבית דריבית'], index=0)
+    # ברירת מחדל: הון ראשוני + ריבית דריבית
+    invest_mode = st.radio('שיטת השקעה לכל עסקה', options=['סכום קבוע לכל עסקה', 'הון ראשוני + ריבית דריבית'], index=1)
     fixed_invest_amount = st.number_input('סכום להשקעה בכל עסקה (כשבחרת סכום קבוע)', min_value=1.0, value=1000.0, step=100.0)
 
     st.subheader('עמלות')
     commission_type = st.selectbox('סוג עמלה', options=['אחוז', 'סכום'], index=0)
-    commission_value = st.number_input('ערך עמלה (למשל: 0.1 עבור 0.1% או 2 עבור 2 ש"ח)', min_value=0.0, value=0.1)
+    commission_value = st.number_input('ערך עמלה (למשל: 0.1 עבור 0.1% או 2 עבור 2 ש"ח)', min_value=0.0, value=0.0)
 
     exec_mode = st.radio('מתי לבצע ביצוע כאשר התנאי מתקיים', options=['ביום האותן', 'ביום המסחר הבא'], index=0)
     execute_next_day = (exec_mode == 'ביום המסחר הבא')
@@ -495,8 +498,6 @@ if submit:
                 c2.metric('סה״כ רווח ברוטו', f"{res['total_gross']:.2f}")
                 c3.metric('סה״כ עמלות', f"{res['total_commissions']:.2f}")
                 c4.metric('אחוזי ביצוע (Win Rate)', f"{win_rate:.2f}%")
-                # תצוגת תשואה כוללת לפי מצב ההשקעה
-                # הערה למשתמש: בחישוב זה נלקח final_equity שהתקבל מהמודל המדמה את שיטת ההשקעה (קבוע/כריבית דריבית).
                 c5.metric('תשואה כוללת (%)', f"{total_return_pct:.2f}%")
 
             st.subheader('גרף מחיר — כניסות ויציאות')
@@ -578,7 +579,12 @@ if submit:
 
 st.markdown('''
 **הערות חשובות:**  
-- הוספתי תצוגת 'תשואה כוללת (%)' שמייצגת את השינוי באקוויטי (final_equity) מול ההון ההתחלתי שהוקלד ב-UI.  
-- החישוב מתאים לשתי השיטות: 'סכום קבוע לכל עסקה' ו־'הון ראשוני + ריבית דריבית' — מאחר שהמודל כבר מעדכן את `equity` לפי השיטה הנבחרת, אנו פשוט משווים את `final_equity` ל־`capital`.  
-- כל שאר הלוגיקה והפונקציות נשמרו בדיוק כפי שהיו.
+- עודכנתי **רק** את ערכי ברירת המחדל כפי שביקשת:  
+  1. תאריך התחלה — תחילת השנה הנוכחית.  
+  2. SMA ברירת מחדל = 200.  
+  3. סף כניסה RSI = 40.  
+  4. סף יציאה RSI = 60.  
+  5. שיטת השקעה ברירת מחדל = 'הון ראשוני + ריבית דריבית'.  
+  6. ערך עמלה ברירת מחדל = 0.0.  
+- כל שאר הלוגיקה, הפונקציות והפיצ'רים נותרו בדיוק כפי שהיו.
 ''')
