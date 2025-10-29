@@ -1,5 +1,5 @@
 # streamlit_backtester_rsi_adx.py
-# Backtester RSI + ADX + SMA — גרסה מתוקנת: המרה בטוחה לערכים סקלריים
+# Backtester RSI + ADX + SMA — גרסה מתוקנת: compute_adx חזק ועמיד לצורות נתונים שונות
 # שמור והרץ: streamlit run streamlit_backtester_rsi_adx.py
 
 import streamlit as st
@@ -28,7 +28,7 @@ st.set_page_config(page_title='Backtester — RSI+ADX+SMA', layout='wide')
 st.title('Backtester — בדיקת אסטרטגיות RSI + ADX + SMA')
 st.caption('נתוני Adjusted Close מ-Yahoo Finance | חימום אינדיקטורים: 250 ימי מסחר')
 
-# ---------------------- פונקציות עזר חדשות ----------------------
+# ---------------------- פונקציות עזר ----------------------
 def to_scalar(x):
     """
     להבטיח ערך סקלרי מתוך כניסה שעשויה להיות scalar, Series או ndarray.
@@ -38,7 +38,6 @@ def to_scalar(x):
         return x
     if x is None:
         return np.nan
-    # pandas Series
     if isinstance(x, pd.Series):
         if x.size == 0:
             return np.nan
@@ -51,9 +50,7 @@ def to_scalar(x):
                 except Exception:
                     return np.nan
         else:
-            # במקרה של סדרה ארוכה — לא ברור איזה ערך צריך, נחזיר NaN כדי למנוע החלטות שגויות
             return np.nan
-    # numpy array or list-like
     if isinstance(x, (np.ndarray, list, tuple)):
         try:
             arr = np.asarray(x)
@@ -64,17 +61,15 @@ def to_scalar(x):
             return np.nan
         except Exception:
             return np.nan
-    # pandas scalar-like (numpy types)
     try:
         return float(x)
     except Exception:
-        # אם לא ניתן להמיר — בדיקה אחרונה: האם יש attribute 'item'
         try:
             return x.item()
         except Exception:
             return np.nan
 
-# ---------------------- פונקציות אינדיקטורים (Wilder style) ----------------------
+# ---------------------- אינדיקטורים (Wilder style) ----------------------
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
     gain = delta.clip(lower=0)
@@ -86,26 +81,70 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     rsi = rsi.replace([np.inf, -np.inf], np.nan)
     return rsi
 
-def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+def compute_adx(high, low, close, period: int = 14) -> pd.Series:
+    """
+    Robust ADX implementation (Wilder style) that tolerates:
+    - high/low/close passed as DataFrame with single column -> squeezes to Series
+    - avoids creating multi-dimensional numpy arrays
+    - uses pandas ops to keep Series shapes consistent
+    """
+    # Ensure inputs are Series (squeeze single-column DataFrame)
+    if isinstance(high, pd.DataFrame):
+        if high.shape[1] == 1:
+            high = high.iloc[:, 0]
+        else:
+            # If DataFrame has multiple columns — try to select first numeric column
+            high = high.select_dtypes(include=[np.number]).iloc[:, 0]
+    if isinstance(low, pd.DataFrame):
+        if low.shape[1] == 1:
+            low = low.iloc[:, 0]
+        else:
+            low = low.select_dtypes(include=[np.number]).iloc[:, 0]
+    if isinstance(close, pd.DataFrame):
+        if close.shape[1] == 1:
+            close = close.iloc[:, 0]
+        else:
+            close = close.select_dtypes(include=[np.number]).iloc[:, 0]
+
+    # Now ensure they are Series
+    high = pd.Series(high).astype(float)
+    low = pd.Series(low).astype(float)
+    close = pd.Series(close).astype(float)
+
     prev_close = close.shift(1)
+
+    # True Range (TR)
     tr1 = high - low
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    # Directional Movement using pandas ops -> always Series 1D
     up_move = high - high.shift(1)
     down_move = low.shift(1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = pd.Series(plus_dm, index=high.index)
-    minus_dm = pd.Series(minus_dm, index=high.index)
+
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+    # Wilder smoothing via ewm (alpha = 1/period)
     atr = tr.ewm(alpha=1/period, adjust=False).mean()
     smooth_plus = plus_dm.ewm(alpha=1/period, adjust=False).mean()
     smooth_minus = minus_dm.ewm(alpha=1/period, adjust=False).mean()
-    plus_di = 100 * (smooth_plus / atr)
-    minus_di = 100 * (smooth_minus / atr)
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+
+    # Avoid division by zero
+    atr_safe = atr.replace(0, np.nan)
+
+    plus_di = 100 * (smooth_plus / atr_safe)
+    minus_di = 100 * (smooth_minus / atr_safe)
+
+    denom = (plus_di + minus_di).replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / denom
+
     adx = dx.ewm(alpha=1/period, adjust=False).mean()
     adx = adx.replace([np.inf, -np.inf], np.nan)
+
+    # align index and return Series
+    adx.index = close.index
     return adx
 
 # ---------------------- עזרי מערכת ----------------------
@@ -204,7 +243,7 @@ if not MATPLOTLIB_AVAILABLE:
         enable_pdf = False
         enable_png = False
 
-# ---------------------- לוגיקה מרכזית ----------------------
+# ---------------------- לוגיקת הבדיקה ----------------------
 if submit:
     if not tickers:
         st.error('אין טיקרים. אנא הזן טיקר/ים תקינים.')
@@ -255,7 +294,7 @@ if submit:
                     adx_v = to_scalar(row.get('ADX', np.nan))
                     sma_v = to_scalar(row.get(f'SMA_{sma_period}', np.nan))
 
-                    # תנאי כניסה — כל השוואה מבוצעת על סקלרים בלבד
+                    # תנאי כניסה
                     entry_cond = True
                     if include_rsi:
                         entry_cond = entry_cond and (not pd.isna(rsi_v)) and (float(rsi_v) <= float(rsi_entry_thresh))
@@ -270,7 +309,7 @@ if submit:
                             if (not pd.isna(prev_sma)) and (not pd.isna(sma_v)):
                                 entry_cond = entry_cond and (float(sma_v) >= float(prev_sma))
 
-                    # כניסה
+                    # כניסה לפוזיציה
                     if (not in_position) and entry_cond:
                         exec_i = i + 1 if execute_next_day else i
                         if exec_i < n:
@@ -319,7 +358,6 @@ if submit:
                                 exit_row = scan_df.iloc[exec_i]
                                 exit_price = to_scalar(exit_row.get('Close', np.nan))
                                 if pd.isna(exit_price):
-                                    # לא ניתן לסגור אם אין מחיר ביצוע
                                     pass
                                 else:
                                     exit_price = float(exit_price)
@@ -393,7 +431,7 @@ if submit:
                         in_position = False
                         entry = None
 
-                # חישוב Buy&Hold
+                # Buy&Hold
                 bh_shares = initial_capital / bh_start_price if (bh_start_price and bh_start_price > 0) else 0.0
                 bh_gross = (bh_end_price - bh_start_price) * bh_shares if (bh_start_price and bh_end_price) else 0.0
                 bh_entry_comm = calc_commission(initial_capital, commission_type, commission_value)
@@ -426,6 +464,7 @@ if submit:
         for ticker, res in results_by_ticker.items():
             st.header(f'תוצאות עבור {ticker}')
             trades_df = res['trades_df']
+
             if trades_df.empty:
                 st.info('לא נרשמו פוזיציות במהלך התקופה.')
             else:
@@ -521,8 +560,7 @@ if submit:
 
 st.markdown('''
 **הערות חשובות:**  
-- כל המחירים מבוססים על Adjusted Close (auto_adjust=True ב-yfinance).  
-- החימום של 250 יום משמש לחישוב יציב של אינדיקטורים; פוזיציות מדווחות רק בתוך הטווח שבחרת.  
-- אם יתגלו עוד מקרי גבול (עמודות לא צפויות / מבני נתונים שלמים), נחזק את הפונקציה to_scalar כדי לטפל בהם.
+- תיקנתי את `compute_adx` כך שיעבוד גם אם high/low/close מגיעים כ-DataFrame או כ-Series מורחב.  
+- ADX מחושב לפי שיטת Wilder (EWM smoothing) — תואם ליישומים סטנדרטיים.  
+- אם תרצה נוכל להוסיף: בדיקות יחידה לחישובי אינדיקטורים, אפשרות לבחור גרסת חישוב (strict Wilder vs ewm-approx), וכן logging דיבאגים שמופיע רק במצב dev.
 ''')
-
