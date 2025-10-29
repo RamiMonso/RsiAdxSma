@@ -204,6 +204,9 @@ def add_indicators(df, params):
 def single_run_backtest(df, params):
     df = add_indicators(df, params)
 
+    # המרה של כל שמות העמודות למחרוזות למניעת שגיאות .lower()
+    df.columns = [str(c) for c in df.columns]
+
     # עמודות מצופות
     expected_cols = ['RSI', 'ADX', 'SMA']
     existing_cols = list(df.columns)
@@ -223,10 +226,10 @@ def single_run_backtest(df, params):
     else:
         st.warning("⚠️ לא נמצאו אינדיקטורים לניקוי ערכים חסרים – ממשיך בלי dropna().")
 
-    # חיפוש דינמי של אינדיקטורים (למקרה שהם נקראים בשם אחר, כמו RSI_14)
-    rsi_col = next((c for c in df.columns if c.lower().startswith('rsi')), None)
-    adx_col = next((c for c in df.columns if c.lower().startswith('adx')), None)
-    sma_col = next((c for c in df.columns if c.lower().startswith('sma')), None)
+    # חיפוש דינמי של אינדיקטורים (ממיר כל שם עמודה למחרוזת ובודק תחילית)
+    rsi_col = next((str(c) for c in df.columns if str(c).lower().startswith('rsi')), None)
+    adx_col = next((str(c) for c in df.columns if str(c).lower().startswith('adx')), None)
+    sma_col = next((str(c) for c in df.columns if str(c).lower().startswith('sma')), None)
 
     st.write(f"🔍 זוהו אינדיקטורים: RSI={rsi_col}, ADX={adx_col}, SMA={sma_col}")
 
@@ -289,6 +292,7 @@ def single_run_backtest(df, params):
         }
 
     return trades_df, summary
+
 
 
 
