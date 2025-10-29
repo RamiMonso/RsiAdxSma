@@ -524,6 +524,11 @@ if run_button:
                     st.plotly_chart(fig, use_container_width=True)
 
 st.markdown('---')
-st.write('הנחיות: להריץ את הקוד: `streamlit run backtester_streamlit.py`.
+st.markdown('---')
+st.write(
+    "הנחיות: להריץ את הקוד: `streamlit run backtester_streamlit.py`.\n\n"
+    "תלויות: התקן עם:\n`pip install -r requirements.txt`"
+)
+
 
 תלויות: `pip install streamlit yfinance pandas numpy plotly reportlab ta`')
