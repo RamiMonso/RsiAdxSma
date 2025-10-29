@@ -1,9 +1,9 @@
 # backtester_streamlit.py
 # Streamlit backtester with extended indicators + grid search using `ta` library
-# Updated: user-selectable indicator participation in strategy (entry/exit),
-# MACD/Stochastic/ATR participation, thresholds, and Grid Search.
-# Fixed: proper multiline strings at the end to avoid SyntaxError.
-# Dependencies: pip install streamlit yfinance pandas numpy plotly reportlab ta
+# Robust indicator computation (safe fallbacks) to avoid ta runtime errors
+# User-selectable indicator participation in strategy (entry/exit),
+# MACD/Stochastic/ATR participation, thresholds, Grid Search.
+# Dependencies: pip install streamlit yfinance pandas numpy plotly ta
 
 import streamlit as st
 import pandas as pd
@@ -14,61 +14,175 @@ from datetime import datetime
 import plotly.graph_objects as go
 from itertools import product
 
-# TA indicators
+# TA indicators (used when available)
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.trend import ADXIndicator, EMAIndicator, MACD
 from ta.volatility import AverageTrueRange
 
-st.set_page_config(page_title="Indicator Backtester — Extended", layout="wide")
+st.set_page_config(page_title="Indicator Backtester — Robust", layout="wide")
 
-# --------------------- Indicator helpers (using ta) ---------------------
+# --------------------- Safe indicator helpers ---------------------
+
+def safe_to_series(s):
+    """Ensure input is a 1-D numeric pandas Series with proper index."""
+    ser = pd.Series(s) if not isinstance(s, pd.Series) else s.copy()
+    ser.index = ser.index  # preserve index
+    ser = pd.to_numeric(ser, errors='coerce')
+    return ser
+
+
+def safe_rsi(close, window=14):
+    close = safe_to_series(close)
+    try:
+        rsi = RSIIndicator(close=close, window=int(window)).rsi()
+        # some versions may return ndarray-like — ensure series
+        rsi = pd.Series(rsi, index=close.index)
+        return rsi
+    except Exception:
+        # fallback: Wilder's RSI implementation
+        delta = close.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.ewm(alpha=1/window, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/window, adjust=False).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.fillna(50)
+
+
+def safe_adx(high, low, close, window=14):
+    high = safe_to_series(high)
+    low = safe_to_series(low)
+    close = safe_to_series(close)
+    try:
+        adx = ADXIndicator(high=high, low=low, close=close, window=int(window)).adx()
+        adx = pd.Series(adx, index=close.index)
+        return adx
+    except Exception:
+        # fallback implementation (Wilder smoothing)
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+        tr1 = high - low
+        tr2 = (high - close.shift()).abs()
+        tr3 = (low - close.shift()).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        atr = tr.ewm(alpha=1/window, adjust=False).mean()
+        plus_di = 100 * (plus_dm.ewm(alpha=1/window, adjust=False).mean() / atr.replace(0, np.nan))
+        minus_di = 100 * (minus_dm.ewm(alpha=1/window, adjust=False).mean() / atr.replace(0, np.nan))
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
+        adx = dx.ewm(alpha=1/window, adjust=False).mean()
+        return adx.fillna(0)
+
+
+def safe_ema(close, window=50):
+    close = safe_to_series(close)
+    try:
+        ema = EMAIndicator(close=close, window=int(window)).ema_indicator()
+        ema = pd.Series(ema, index=close.index)
+        return ema
+    except Exception:
+        return close.ewm(span=window, adjust=False).mean()
+
+
+def safe_macd(close):
+    close = safe_to_series(close)
+    try:
+        macd = MACD(close=close)
+        macd_line = pd.Series(macd.macd(), index=close.index)
+        macd_sig = pd.Series(macd.macd_signal(), index=close.index)
+        return macd_line, macd_sig
+    except Exception:
+        # simple fallback: short ema - long ema
+        fast = close.ewm(span=12, adjust=False).mean()
+        slow = close.ewm(span=26, adjust=False).mean()
+        macd_line = fast - slow
+        macd_sig = macd_line.ewm(span=9, adjust=False).mean()
+        return macd_line, macd_sig
+
+
+def safe_stochastic(high, low, close, k_window=14, d_window=3):
+    high = safe_to_series(high)
+    low = safe_to_series(low)
+    close = safe_to_series(close)
+    try:
+        stoch = StochasticOscillator(high=high, low=low, close=close, window=int(k_window), smooth_window=int(d_window))
+        k = pd.Series(stoch.stoch(), index=close.index)
+        d = pd.Series(stoch.stoch_signal(), index=close.index)
+        return k, d
+    except Exception:
+        lowest_low = low.rolling(window=k_window, min_periods=1).min()
+        highest_high = high.rolling(window=k_window, min_periods=1).max()
+        k = 100 * ((close - lowest_low) / (highest_high - lowest_low).replace(0, np.nan))
+        d = k.rolling(window=d_window, min_periods=1).mean()
+        return k, d
+
+
+def safe_atr(high, low, close, window=14):
+    high = safe_to_series(high)
+    low = safe_to_series(low)
+    close = safe_to_series(close)
+    try:
+        atr = AverageTrueRange(high=high, low=low, close=close, window=int(window)).average_true_range()
+        atr = pd.Series(atr, index=close.index)
+        return atr
+    except Exception:
+        tr1 = high - low
+        tr2 = (high - close.shift()).abs()
+        tr3 = (low - close.shift()).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1/window, adjust=False).mean()
+        return atr
+
+# --------------------- add_indicators (robust) ---------------------
 
 def add_indicators(df, params):
     df = df.copy()
-    close = df['Close']
-    high = df['High']
-    low = df['Low']
+    # ensure Close/High/Low exist
+    for col in ['Close','High','Low']:
+        if col not in df.columns:
+            raise ValueError(f"DataFrame missing required column: {col}")
+
+    close = safe_to_series(df['Close'])
+    high = safe_to_series(df['High'])
+    low = safe_to_series(df['Low'])
 
     # RSI
     rsi_period = int(params.get('rsi_period', 14))
-    rsi_indicator = RSIIndicator(close=close, window=rsi_period)
-    df['RSI'] = rsi_indicator.rsi()
+    df['RSI'] = safe_rsi(close, rsi_period)
 
     # ADX
     adx_period = int(params.get('adx_period', rsi_period))
-    adx_indicator = ADXIndicator(high=high, low=low, close=close, window=adx_period)
-    df['ADX'] = adx_indicator.adx()
+    df['ADX'] = safe_adx(high, low, close, adx_period)
 
     # SMA/EMA
     sma_period = int(params.get('sma_period', 50))
     df['SMA'] = close.rolling(sma_period).mean()
-    df['EMA'] = EMAIndicator(close=close, window=sma_period).ema_indicator()
+    df['EMA'] = safe_ema(close, sma_period)
 
     # MACD
-    macd = MACD(close=close)
-    df['MACD'] = macd.macd()
-    df['MACD_SIGNAL'] = macd.macd_signal()
+    macd_line, macd_sig = safe_macd(close)
+    df['MACD'] = macd_line
+    df['MACD_SIGNAL'] = macd_sig
 
-    # Stochastic (fast %K)
+    # Stochastic
     stoch_k_period = int(params.get('stoch_k_period', 14))
-    stoch = StochasticOscillator(high=high, low=low, close=close, window=stoch_k_period, smooth_window=3)
-    df['STOCH_K'] = stoch.stoch()
-    df['STOCH_D'] = stoch.stoch_signal()
+    stoch_k, stoch_d = safe_stochastic(high, low, close, stoch_k_period, 3)
+    df['STOCH_K'] = stoch_k
+    df['STOCH_D'] = stoch_d
 
     # ATR
     atr_period = int(params.get('atr_period', 14))
-    atr = AverageTrueRange(high=high, low=low, close=close, window=atr_period)
-    df['ATR'] = atr.average_true_range()
+    df['ATR'] = safe_atr(high, low, close, atr_period)
 
     return df
 
 # --------------------- Backtest logic ---------------------
 
 def single_run_backtest(df, params):
-    """Run the strategy once on df given params.
-    The 'params' dict controls which indicators participate in entry/exit and their thresholds.
-    Returns trades_df and summary metrics.
-    """
     df = add_indicators(df, params)
     trades = []
     position = None
@@ -81,15 +195,12 @@ def single_run_backtest(df, params):
     price_ma_field = 'SMA' if params.get('ma_type','SMA')=='SMA' else 'EMA'
 
     # Additional indicator participation settings
-    macd_part = params.get('macd_part', [])  # list e.g. ['Entry','Exit']
+    macd_part = params.get('macd_part', [])
     stoch_part = params.get('stoch_part', [])
     atr_part = params.get('atr_part', [])
 
-    # Stochastic thresholds
     stoch_entry_thr = float(params.get('stoch_entry_thr', 20.0))
     stoch_exit_thr = float(params.get('stoch_exit_thr', 80.0))
-
-    # ATR thresholds (absolute) for example usage: entry if ATR < atr_entry_max
     atr_entry_max = float(params.get('atr_entry_max', 999999.0))
     atr_exit_min = float(params.get('atr_exit_min', -1.0))
 
@@ -105,23 +216,17 @@ def single_run_backtest(df, params):
 
         if position is None:
             conds = []
-            # RSI
             conds.append((not np.isnan(rsi_val)) and (rsi_val < rsi_entry))
-            # ADX
             conds.append((not np.isnan(adx_val)) and (adx_val < adx_thresh))
-            # MA price condition
             if use_ma:
                 conds.append((not np.isnan(ma_val)) and (close > ma_val))
 
-            # MACD participation for Entry: MACD > Signal
             if 'Entry' in macd_part:
                 conds.append((not np.isnan(macd_val)) and (not np.isnan(macd_sig)) and (macd_val > macd_sig))
 
-            # Stochastic participation for Entry: STOCH_K < threshold
             if 'Entry' in stoch_part:
                 conds.append((not np.isnan(stoch_k)) and (stoch_k < stoch_entry_thr))
 
-            # ATR participation for Entry: ATR < entry_max
             if 'Entry' in atr_part:
                 conds.append((not np.isnan(atr)) and (atr < atr_entry_max))
 
@@ -139,19 +244,15 @@ def single_run_backtest(df, params):
                 }
         else:
             exit_conds = []
-            # Core exit: RSI above exit threshold and price > entry price (per original logic)
             exit_conds.append((not np.isnan(rsi_val)) and (rsi_val > rsi_exit))
             exit_conds.append(close > position['entry_price'])
 
-            # MACD participation for Exit: MACD < Signal
             if 'Exit' in macd_part:
                 exit_conds.append((not np.isnan(macd_val)) and (not np.isnan(macd_sig)) and (macd_val < macd_sig))
 
-            # Stochastic participation for Exit: STOCH_K > threshold
             if 'Exit' in stoch_part:
                 exit_conds.append((not np.isnan(stoch_k)) and (stoch_k > stoch_exit_thr))
 
-            # ATR participation for Exit: ATR > exit_min (example)
             if 'Exit' in atr_part:
                 exit_conds.append((not np.isnan(atr)) and (atr > atr_exit_min))
 
@@ -177,7 +278,6 @@ def single_run_backtest(df, params):
                 trades.append(exit_trade)
                 position = None
 
-    # optionally close open position on run
     if position is not None and params.get('close_open_on_run', False):
         last = df.iloc[-1]
         date = df.index[-1]
@@ -203,18 +303,12 @@ def single_run_backtest(df, params):
 
     trades_df = pd.DataFrame(trades)
     if trades_df.empty:
-        summary = {
-            'n_trades': 0,
-            'compounded_return_pct': 0.0,
-            'avg_trade_pct': 0.0,
-            'win_rate': 0.0
-        }
+        summary = {'n_trades':0,'compounded_return_pct':0.0,'avg_trade_pct':0.0,'win_rate':0.0}
         return trades_df, summary
 
-    # fees
-    fee_type = params.get('fee_type', 'none')
-    fee_value = float(params.get('fee_value', 0))
-    fee_percent = float(params.get('fee_percent', 0))
+    fee_type = params.get('fee_type','none')
+    fee_value = float(params.get('fee_value',0))
+    fee_percent = float(params.get('fee_percent',0))
 
     def profit_after_fees(row):
         e = row['entry_price']
@@ -233,27 +327,20 @@ def single_run_backtest(df, params):
     trades_df['profit_pct'] = trades_df.apply(profit_after_fees, axis=1)
     trades_df['win'] = trades_df['profit_pct'] > 0
 
-    # compounded return assuming starting capital and reinvest
-    capital = float(params.get('capital', 1000.0))
+    capital = float(params.get('capital',1000.0))
     cap = capital
     for p in trades_df['profit_pct']:
         cap = cap * (1 + p/100)
     compounded_return_pct = (cap - capital) / capital * 100
 
-    summary = {
-        'n_trades': len(trades_df),
-        'compounded_return_pct': compounded_return_pct,
-        'avg_trade_pct': trades_df['profit_pct'].mean(),
-        'win_rate': trades_df['win'].mean()
-    }
+    summary = {'n_trades': len(trades_df), 'compounded_return_pct': compounded_return_pct, 'avg_trade_pct': trades_df['profit_pct'].mean(), 'win_rate': trades_df['win'].mean()}
 
     return trades_df, summary
 
-# --------------------- Grid search utilities ---------------------
+# --------------------- Grid utilities & UI ---------------------
 
 def parse_range_input(text_or_list, cast=int):
-    """Allow input as comma-separated list like '10,20,30' or range '10-50:10' meaning start-end:step"""
-    if isinstance(text_or_list, (list, tuple)):
+    if isinstance(text_or_list,(list,tuple)):
         return [cast(x) for x in text_or_list]
     s = str(text_or_list).strip()
     if not s:
@@ -262,7 +349,6 @@ def parse_range_input(text_or_list, cast=int):
     values = []
     for p in parts:
         if '-' in p:
-            # maybe form start-end or start-end:step
             if ':' in p:
                 rng, step = p.split(':')
                 start, end = [int(x) for x in rng.split('-')]
@@ -273,33 +359,25 @@ def parse_range_input(text_or_list, cast=int):
                 values.extend(list(range(start, end+1)))
         else:
             values.append(cast(p))
-    # unique sorted
     return sorted(list(dict.fromkeys(values)))
 
 # --------------------- Streamlit UI ---------------------
 
-st.title('Indicator Backtester — Extended (user-selectable indicator participation)')
-
-# Inputs
+st.title('Indicator Backtester — Robust')
 left, right = st.columns(2)
 with left:
     ticker = st.text_input('שם מניה (Ticker)', value='AAPL')
     start_date = st.date_input('תאריך תחילת סריקה', value=pd.to_datetime('2023-01-01'))
     end_date = st.date_input('תאריך סוף סריקה', value=pd.to_datetime(datetime.today().date()))
     interval = st.selectbox('בחירת גרף', options=['1d','60m'], index=0, format_func=lambda x: 'יומי' if x=='1d' else 'שاعي')
-
 with right:
-    # core params
     rsi_period = st.number_input('ימים ל-RSI (window)', min_value=2, max_value=200, value=14)
     adx_period = st.number_input('ימים ל-ADX (window)', min_value=2, max_value=200, value=14)
     sma_period = st.number_input('SMA/EMA period', min_value=1, max_value=500, value=50)
     rsi_entry = st.number_input('רף RSI כניסה', min_value=0.0, max_value=100.0, value=30.0)
     rsi_exit = st.number_input('רף RSI יציאה', min_value=0.0, max_value=100.0, value=60.0)
     adx_threshold = st.number_input('רף ADX — כניסה כאשר ADX נמוך מ:', min_value=0.0, max_value=200.0, value=25.0)
-
 st.markdown('---')
-
-# Additional indicators toggle + participation selection
 st.subheader('בחירת אינדיקטורים שישתתפו באסטרטגיה')
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -328,17 +406,9 @@ with col3:
         atr_part = []
         atr_entry_max = 99999.0
         atr_exit_min = -1.0
-
-# MA type and usage
-ma_col1, ma_col2 = st.columns(2)
-with ma_col1:
-    ma_type = st.selectbox('סוג MA', options=['SMA','EMA'], index=0)
-with ma_col2:
-    use_ma = st.checkbox('לכלול בדיקת מחיר > MA כצעד בתנאי הכניסה', value=True)
-
+ma_type = st.selectbox('סוג MA', options=['SMA','EMA'], index=0)
+use_ma = st.checkbox('לכלול בדיקת מחיר > MA כצעד בתנאי הכניסה', value=True)
 st.markdown('---')
-
-# Fees and options
 colf1, colf2 = st.columns(2)
 with colf1:
     close_open_option = st.checkbox('לסגור פוזיציה פתוחה ביום הרצת הקוד (אם יש)', value=True)
@@ -349,19 +419,14 @@ with colf1:
         fee_value = st.number_input('עמלת כניסה/יציאה (מטבע) - absolute', value=0.0)
     elif fee_mode == 'percent':
         fee_percent = st.number_input('עמלת כניסה/יציאה (%) - percent', value=0.0)
-
 with colf2:
     export_csv = st.checkbox('אפשרות לייצא לטבלה (CSV)', value=True)
     return_mode = st.selectbox('צורת חישוב תשואה', options=['per_trade','fixed_investment'], format_func=lambda x: 'דריבית/חיוב מחדש' if x=='per_trade' else 'הפקדה קבועה לכל עסקה')
     capital = st.number_input('הון התחלתי (לצורך חישוב דריבית)', value=1000.0, min_value=0.0)
     investment_per_trade = st.number_input('הפקדה קבועה לכל עסקה', value=100.0, min_value=0.0)
-
 st.markdown('---')
-
-# Grid search
 st.subheader('Grid Search — הרצת ריבוי פרמטרים')
 use_grid = st.checkbox('הפעל Grid Search (בדיקת וריאציות פרמטרים)', value=False)
-
 grid_col1, grid_col2 = st.columns(2)
 with grid_col1:
     rsi_entry_range = st.text_input('טווח RSI כניסה — רשום כמו "10-40:5" או "10,20,30"', value='20-40:5')
@@ -369,15 +434,11 @@ with grid_col1:
 with grid_col2:
     adx_range = st.text_input('טווח ADX threshold — לדוגמה "10,20,30" או "10-50:10"', value='10,20,30')
     sma_range = st.text_input('טווח SMA periods — לדוגמה "20,50,100" או "10-100:10"', value='20,50,100')
-
 max_combinations = st.number_input('מגבלת קומבינציות מרבית ל-run (המלצה 200)', min_value=10, max_value=5000, value=300)
-
 run_button = st.button('הרצת הבדיקה (Run Backtest / Grid)')
 
-# --------------------- Execution ---------------------
 if run_button:
     with st.spinner('מוריד נתונים ומריץ בדיקה — זה עשוי לקחת זמן עבור Grid Search...'):
-        # download data
         df = yf.download(ticker, start=start_date, end=end_date + pd.Timedelta(days=1), interval=interval, progress=False)
         if df.empty:
             st.error('לא נמצאו נתונים — בדוק את הטיקר, טווח התאריכים או האינטרוול.')
@@ -397,7 +458,6 @@ if run_button:
                 'fee_percent': fee_percent,
                 'capital': capital,
                 'investment_per_trade': investment_per_trade,
-                # additional indicator participation
                 'macd_part': macd_part,
                 'stoch_part': stoch_part,
                 'stoch_entry_thr': stoch_entry_thr,
@@ -407,7 +467,6 @@ if run_button:
                 'atr_exit_min': atr_exit_min
             }
 
-            # single run (no grid)
             if not use_grid:
                 params = base_params.copy()
                 params.update({'rsi_period': rsi_period, 'adx_period': adx_period, 'sma_period': sma_period})
@@ -422,7 +481,6 @@ if run_button:
                     display_df = trades_df.copy()
                     display_df['entry_date'] = pd.to_datetime(display_df['entry_date']).dt.date
                     display_df['exit_date'] = pd.to_datetime(display_df['exit_date']).dt.date
-                    # show many columns including chosen indicators
                     cols_to_show = ['entry_date','entry_rsi','entry_adx','entry_ma','entry_macd','entry_stoch','entry_atr','entry_price','exit_date','exit_rsi','exit_adx','exit_ma','exit_macd','exit_stoch','exit_atr','exit_price','profit_pct']
                     for c in cols_to_show:
                         if c not in display_df.columns:
@@ -436,7 +494,6 @@ if run_button:
                     st.metric('תשואה ממוצעת לעסקה', f"{summary['avg_trade_pct']:.2f}%")
                     st.metric('שיעור הצלחות (win rate)', f"{summary['win_rate']*100:.1f}%")
 
-                    # chart
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Close'))
                     df_with_inds = add_indicators(df, params)
@@ -454,13 +511,11 @@ if run_button:
                         st.download_button('הורד רשימת פוזיציות (CSV)', data=csv, file_name=f'trades_{ticker}_{start_date}_{end_date}.csv', mime='text/csv')
 
             else:
-                # GRID: parse ranges
                 rsi_entry_vals = parse_range_input(rsi_entry_range, cast=int)
                 rsi_exit_vals = parse_range_input(rsi_exit_range, cast=int)
                 adx_vals = parse_range_input(adx_range, cast=int)
                 sma_vals = parse_range_input(sma_range, cast=int)
 
-                # build combinations
                 combos = list(product(rsi_entry_vals, rsi_exit_vals, adx_vals, sma_vals))
                 if len(combos) > int(max_combinations):
                     st.error(f'נמצאו {len(combos)} קומבינציות — גבוה מהמגבלה ({max_combinations}). צמצם את הטווחים או הגדל את המגבלה.')
@@ -471,16 +526,7 @@ if run_button:
                         params = base_params.copy()
                         params.update({'rsi_entry': r_entry, 'rsi_exit': r_exit, 'adx_threshold': a_val, 'sma_period': s_val, 'rsi_period': rsi_period, 'adx_period': adx_period})
                         trades_df, summary = single_run_backtest(df, params)
-                        res = {
-                            'rsi_entry': r_entry,
-                            'rsi_exit': r_exit,
-                            'adx_threshold': a_val,
-                            'sma_period': s_val,
-                            'n_trades': summary['n_trades'],
-                            'compounded_return_pct': summary['compounded_return_pct'],
-                            'avg_trade_pct': summary['avg_trade_pct'],
-                            'win_rate': summary['win_rate']
-                        }
+                        res = {'rsi_entry': r_entry, 'rsi_exit': r_exit, 'adx_threshold': a_val, 'sma_period': s_val, 'n_trades': summary['n_trades'], 'compounded_return_pct': summary['compounded_return_pct'], 'avg_trade_pct': summary['avg_trade_pct'], 'win_rate': summary['win_rate']}
                         results.append(res)
                         progress.progress(int((i+1)/len(combos)*100))
 
@@ -490,7 +536,6 @@ if run_button:
                     st.subheader('תוצאות Grid Search — סיכום קומבינציות')
                     st.dataframe(res_df)
 
-                    # top 5 plots
                     top_n = min(5, len(res_df))
                     st.markdown('### Top configurations')
                     for k in range(top_n):
@@ -501,7 +546,6 @@ if run_button:
                         csv = res_df.to_csv(index=False).encode('utf-8')
                         st.download_button('הורד תוצאות Grid (CSV)', data=csv, file_name=f'grid_results_{ticker}_{start_date}_{end_date}.csv', mime='text/csv')
 
-                    # allow user to pick one of top combos to visualize
                     sel_idx = st.number_input('הצג גרף עבור שורה (index) מסיכום Grid', min_value=0, max_value=len(res_df)-1, value=0)
                     sel = res_df.iloc[int(sel_idx)]
                     params = base_params.copy()
@@ -521,7 +565,6 @@ if run_button:
                     fig.update_layout(title=f'Grid Selection — {ticker}', xaxis_title='Date', yaxis_title='Price')
                     st.plotly_chart(fig, use_container_width=True)
 
-# --------------------- Footer / Instructions ---------------------
 st.markdown('---')
 st.markdown(
     """הנחיות: להריץ את הקוד:
