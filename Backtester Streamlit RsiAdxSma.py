@@ -204,30 +204,35 @@ def add_indicators(df, params):
 def single_run_backtest(df, params):
     df = add_indicators(df, params)
 
-    # נבדוק אילו עמודות נוספו בפועל
+    # עמודות מצופות
     expected_cols = ['RSI', 'ADX', 'SMA']
-    available_cols = [col for col in expected_cols if col in df.columns]
+    existing_cols = list(df.columns)
 
-    # הדפסה לצורך דיבוג – תראה אילו עמודות קיימות בפועל
-    st.write("📊 עמודות קיימות לאחר add_indicators:", list(df.columns))
+    # נמצא רק את אלה שבאמת קיימות
+    available_cols = [col for col in expected_cols if col in existing_cols]
+
+    # הדפסה לצורך דיבוג
+    st.write("📊 עמודות קיימות לאחר add_indicators:", existing_cols)
     st.write("🧩 עמודות אינדיקטורים זמינות:", available_cols)
 
-    # אם אף אחת לא קיימת – אל תנסה לנקות
-    if not available_cols:
-        st.warning("⚠️ לא נמצאו אינדיקטורים ב-DataFrame. ייתכן שהשמות שונים או שהפונקציה add_indicators לא החזירה אותם.")
-    else:
-        # ננקה רק עמודות שקיימות בפועל
-        df = df.dropna(subset=available_cols, how='any')
+    # נוודא שהעמודות ב־dropna קיימות באמת
+    valid_drop_cols = [col for col in available_cols if col in df.columns]
 
-    # חיפוש עמודות אינדיקטור לפי תחילית (במקרה שהם בשם אחר כמו RSI_14)
+    if valid_drop_cols:
+        df = df.dropna(subset=valid_drop_cols, how='any')
+    else:
+        st.warning("⚠️ לא נמצאו אינדיקטורים לניקוי ערכים חסרים – ממשיך בלי dropna().")
+
+    # חיפוש דינמי של אינדיקטורים (למקרה שהם נקראים בשם אחר, כמו RSI_14)
     rsi_col = next((c for c in df.columns if c.lower().startswith('rsi')), None)
     adx_col = next((c for c in df.columns if c.lower().startswith('adx')), None)
     sma_col = next((c for c in df.columns if c.lower().startswith('sma')), None)
 
     st.write(f"🔍 זוהו אינדיקטורים: RSI={rsi_col}, ADX={adx_col}, SMA={sma_col}")
 
+    # אם אחד חסר – נעצור בצורה בטוחה
     if not all([rsi_col, adx_col, sma_col]):
-        st.error("❌ לא נמצאו כל שלושת האינדיקטורים הנדרשים. עצור לבדיקה.")
+        st.error("❌ לא נמצאו כל שלושת האינדיקטורים הנדרשים. בדוק את add_indicators.")
         return pd.DataFrame(), {}
 
     # פרמטרים
@@ -284,6 +289,7 @@ def single_run_backtest(df, params):
         }
 
     return trades_df, summary
+
 
 
 
