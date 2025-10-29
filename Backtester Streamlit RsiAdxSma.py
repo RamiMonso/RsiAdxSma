@@ -1,7 +1,6 @@
 # streamlit_backtester_rsi_adx.py
-# Backtester RSI + ADX + SMA — גרסה יציבה לשימוש ב-Streamlit Cloud
-# אין תלות ב-pandas_ta/numba; חישובי RSI/ADX פנימיים (Wilder/EWM)
-# הוראות: שמור כקובץ והרץ: streamlit run streamlit_backtester_rsi_adx.py
+# Backtester RSI + ADX + SMA — גרסה מתוקנת: המרה בטוחה לערכים סקלריים
+# שמור והרץ: streamlit run streamlit_backtester_rsi_adx.py
 
 import streamlit as st
 import yfinance as yf
@@ -10,7 +9,7 @@ import numpy as np
 from io import BytesIO
 from datetime import datetime, timedelta
 
-# matplotlib optional (אם שכחת/ה להתקין — היישום עדיין ירוץ)
+# matplotlib optional
 MATPLOTLIB_AVAILABLE = True
 try:
     import matplotlib.pyplot as plt
@@ -29,12 +28,57 @@ st.set_page_config(page_title='Backtester — RSI+ADX+SMA', layout='wide')
 st.title('Backtester — בדיקת אסטרטגיות RSI + ADX + SMA')
 st.caption('נתוני Adjusted Close מ-Yahoo Finance | חימום אינדיקטורים: 250 ימי מסחר')
 
+# ---------------------- פונקציות עזר חדשות ----------------------
+def to_scalar(x):
+    """
+    להבטיח ערך סקלרי מתוך כניסה שעשויה להיות scalar, Series או ndarray.
+    אם לא ניתן לחלץ scalar יחיד — מחזיר np.nan.
+    """
+    if isinstance(x, (int, float, np.floating, np.integer)) and not isinstance(x, (np.ndarray, pd.Series)):
+        return x
+    if x is None:
+        return np.nan
+    # pandas Series
+    if isinstance(x, pd.Series):
+        if x.size == 0:
+            return np.nan
+        if x.size == 1:
+            try:
+                return x.iloc[0]
+            except Exception:
+                try:
+                    return x.values[0]
+                except Exception:
+                    return np.nan
+        else:
+            # במקרה של סדרה ארוכה — לא ברור איזה ערך צריך, נחזיר NaN כדי למנוע החלטות שגויות
+            return np.nan
+    # numpy array or list-like
+    if isinstance(x, (np.ndarray, list, tuple)):
+        try:
+            arr = np.asarray(x)
+            if arr.size == 0:
+                return np.nan
+            if arr.size == 1:
+                return arr.reshape(-1)[0].item()
+            return np.nan
+        except Exception:
+            return np.nan
+    # pandas scalar-like (numpy types)
+    try:
+        return float(x)
+    except Exception:
+        # אם לא ניתן להמיר — בדיקה אחרונה: האם יש attribute 'item'
+        try:
+            return x.item()
+        except Exception:
+            return np.nan
+
 # ---------------------- פונקציות אינדיקטורים (Wilder style) ----------------------
 def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    # Wilder smoothing approximation via EWM (alpha = 1/period)
     avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
     rs = avg_gain / avg_loss
@@ -48,18 +92,15 @@ def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int =
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
     up_move = high - high.shift(1)
     down_move = low.shift(1) - low
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     plus_dm = pd.Series(plus_dm, index=high.index)
     minus_dm = pd.Series(minus_dm, index=high.index)
-
     atr = tr.ewm(alpha=1/period, adjust=False).mean()
     smooth_plus = plus_dm.ewm(alpha=1/period, adjust=False).mean()
     smooth_minus = minus_dm.ewm(alpha=1/period, adjust=False).mean()
-
     plus_di = 100 * (smooth_plus / atr)
     minus_di = 100 * (smooth_minus / atr)
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
@@ -69,10 +110,6 @@ def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int =
 
 # ---------------------- עזרי מערכת ----------------------
 def download_data(ticker: str, start_date: pd.Timestamp, end_date: pd.Timestamp, interval: str, warmup_days: int = 250) -> pd.DataFrame:
-    """
-    הורדת נתונים מ-Yahoo Finance עם auto_adjust=True (Adjusted Close יופיע כ-'Close').
-    מוסיף חימום של warmup_days לפני start_date.
-    """
     start_fetch = pd.to_datetime(start_date) - pd.Timedelta(days=warmup_days)
     end_fetch = pd.to_datetime(end_date) + pd.Timedelta(days=1)
     df = yf.download(ticker,
@@ -83,19 +120,15 @@ def download_data(ticker: str, start_date: pd.Timestamp, end_date: pd.Timestamp,
                      auto_adjust=True)
     if df is None or df.empty:
         return pd.DataFrame()
-    # במקרה שאין 'Close' - נסו 'Adj Close'
     if 'Close' not in df.columns:
         if 'Adj Close' in df.columns:
             df['Close'] = df['Adj Close']
         else:
-            # נסיון גנרי להתאים שמות
             cols_lower = [c.lower() for c in df.columns]
             if 'close' in cols_lower:
-                # נניח שיש עמודה בשם 'close' (קטן/גדול)
                 df.columns = [c.capitalize() if c.lower()=='close' else c for c in df.columns]
             else:
                 return pd.DataFrame()
-    # וודא אינדקס מסוג DatetimeIndex
     if not isinstance(df.index, pd.DatetimeIndex):
         df = df.reset_index()
         if 'Date' in df.columns:
@@ -104,10 +137,6 @@ def download_data(ticker: str, start_date: pd.Timestamp, end_date: pd.Timestamp,
     return df
 
 def calc_commission(value: float, commission_type: str, commission_value: float) -> float:
-    """
-    commission_type: 'אחוז' או 'סכום'
-    commission_value: אם אחוז — הזן ערך כמו 0.1 עבור 0.1% (ולא 0.001)
-    """
     if commission_value == 0:
         return 0.0
     if commission_type == 'אחוז':
@@ -168,14 +197,14 @@ with st.sidebar.form('settings'):
 
     submit = st.form_submit_button('הרץ את הבדיקה')
 
-# אם matplotlib חסר — השבת הורדות מתאימות
+# השבת הורדות אם matplotlib חסר
 if not MATPLOTLIB_AVAILABLE:
     if enable_pdf or enable_png:
         st.sidebar.warning('matplotlib לא מותקן — אפשרויות הורדת PNG/PDF מושבתות עד להתקנה.')
         enable_pdf = False
         enable_png = False
 
-# ---------------------- לוגיקת הבדיקה ----------------------
+# ---------------------- לוגיקה מרכזית ----------------------
 if submit:
     if not tickers:
         st.error('אין טיקרים. אנא הזן טיקר/ים תקינים.')
@@ -191,11 +220,9 @@ if submit:
                     continue
 
                 df = raw.copy()
-
-                # שמור הון התחלתי לצורך השוואת Buy&Hold נכונה
                 initial_capital = float(capital)
 
-                # חישוב אינדיקטורים
+                # חישובי אינדיקטורים
                 df['RSI'] = compute_rsi(df['Close'], period=rsi_period) if include_rsi else np.nan
                 df['ADX'] = compute_adx(df['High'], df['Low'], df['Close'], period=adx_period) if include_adx else np.nan
                 df[f'SMA_{sma_period}'] = df['Close'].rolling(window=sma_period, min_periods=1).mean() if include_sma else np.nan
@@ -210,7 +237,6 @@ if submit:
                     st.warning(f'לא נותרו נתונים בסקירה עבור {ticker} (לאחר חימום/טווח).')
                     continue
 
-                # המרות לרשימות עבודה
                 idx = list(scan_df.index)
                 n = len(idx)
                 trades = []
@@ -219,19 +245,17 @@ if submit:
                 equity = initial_capital
                 cumulative_equity = []
 
-                # Buy & Hold baseline (על בסיס initial_capital)
-                bh_start_price = scan_df['Close'].iloc[0]
-                bh_end_price = scan_df['Close'].iloc[-1]
+                bh_start_price = to_scalar(scan_df['Close'].iloc[0])
+                bh_end_price = to_scalar(scan_df['Close'].iloc[-1])
 
-                # לולאה לפי מיקום (iloc) — עוזר למקרים של אינדקס כפול
                 for i in range(n):
                     row = scan_df.iloc[i]
-                    price = float(row['Close'])
-                    rsi_v = row.get('RSI', np.nan)
-                    adx_v = row.get('ADX', np.nan)
-                    sma_v = row.get(f'SMA_{sma_period}', np.nan)
+                    price = to_scalar(row.get('Close', np.nan))
+                    rsi_v = to_scalar(row.get('RSI', np.nan))
+                    adx_v = to_scalar(row.get('ADX', np.nan))
+                    sma_v = to_scalar(row.get(f'SMA_{sma_period}', np.nan))
 
-                    # תנאי כניסה
+                    # תנאי כניסה — כל השוואה מבוצעת על סקלרים בלבד
                     entry_cond = True
                     if include_rsi:
                         entry_cond = entry_cond and (not pd.isna(rsi_v)) and (float(rsi_v) <= float(rsi_entry_thresh))
@@ -242,99 +266,103 @@ if submit:
                     if check_not_strong_down and include_sma:
                         prev_i = i - 1
                         if prev_i >= 0:
-                            prev_sma = scan_df.iloc[prev_i].get(f'SMA_{sma_period}', np.nan)
+                            prev_sma = to_scalar(scan_df.iloc[prev_i].get(f'SMA_{sma_period}', np.nan))
                             if (not pd.isna(prev_sma)) and (not pd.isna(sma_v)):
                                 entry_cond = entry_cond and (float(sma_v) >= float(prev_sma))
 
-                    # כניסה לפוזיציה (אם אין פוזיציה פתוחה)
+                    # כניסה
                     if (not in_position) and entry_cond:
                         exec_i = i + 1 if execute_next_day else i
                         if exec_i < n:
                             exec_row = scan_df.iloc[exec_i]
-                            exec_price = float(exec_row['Close'])
-                            # קביעת סכום השקעה
+                            exec_price = to_scalar(exec_row.get('Close', np.nan))
+                            if exec_price is np.nan or pd.isna(exec_price):
+                                continue
+
                             if invest_mode == 'סכום קבוע לכל עסקה':
                                 invest_amount = float(fixed_invest_amount)
                             else:
                                 invest_amount = float(equity) if equity > 0 else float(fixed_invest_amount)
 
-                            quantity = invest_amount / exec_price
+                            quantity = invest_amount / float(exec_price) if float(exec_price) != 0 else 0.0
                             if not fractional_shares:
                                 quantity = float(np.floor(quantity))
                                 if quantity <= 0:
-                                    # סכום קטן מדי לקניית יחידה שלמה
                                     continue
 
                             entry_comm = calc_commission(invest_amount, commission_type, commission_value)
-                            equity -= entry_comm  # מורידים עמלה מההון
+                            equity -= entry_comm
 
                             entry = {
                                 'entry_idx': exec_i,
                                 'entry_date': idx[exec_i],
-                                'entry_price': exec_price,
-                                'entry_RSI': exec_row.get('RSI', np.nan),
-                                'entry_ADX': exec_row.get('ADX', np.nan),
-                                'entry_SMA': exec_row.get(f'SMA_{sma_period}', np.nan),
+                                'entry_price': float(exec_price),
+                                'entry_RSI': to_scalar(exec_row.get('RSI', np.nan)),
+                                'entry_ADX': to_scalar(exec_row.get('ADX', np.nan)),
+                                'entry_SMA': to_scalar(exec_row.get(f'SMA_{sma_period}', np.nan)),
                                 'quantity': quantity,
                                 'invest_amount': invest_amount,
                                 'entry_commission': entry_comm
                             }
                             in_position = True
 
-                    # יציאה — רק אם יש פוזיציה פתוחה
+                    # יציאה
                     if in_position and (entry is not None):
-                        # בדיקת RSI של היום (כפי שנקבע בדרישות): אם אין RSI מחזירים False
                         exit_cond = True
                         if include_rsi:
-                            cur_rsi = row.get('RSI', np.nan)
+                            cur_rsi = to_scalar(row.get('RSI', np.nan))
                             exit_cond = exit_cond and (not pd.isna(cur_rsi)) and (float(cur_rsi) >= float(rsi_exit_thresh))
 
                         if exit_cond:
                             exec_i = i + 1 if execute_next_day else i
                             if exec_i < n:
                                 exit_row = scan_df.iloc[exec_i]
-                                exit_price = float(exit_row['Close'])
-                                # תנאי נוסף: מחיר יציאה גבוה ממחיר כניסה
-                                if exit_price > entry['entry_price']:
-                                    gross_pl = (exit_price - entry['entry_price']) * entry['quantity']
-                                    exit_comm = calc_commission(exit_price * entry['quantity'], commission_type, commission_value)
-                                    net_pl = gross_pl - exit_comm
+                                exit_price = to_scalar(exit_row.get('Close', np.nan))
+                                if pd.isna(exit_price):
+                                    # לא ניתן לסגור אם אין מחיר ביצוע
+                                    pass
+                                else:
+                                    exit_price = float(exit_price)
+                                    if exit_price > entry['entry_price']:
+                                        gross_pl = (exit_price - entry['entry_price']) * entry['quantity']
+                                        exit_comm = calc_commission(exit_price * entry['quantity'], commission_type, commission_value)
+                                        net_pl = gross_pl - exit_comm
 
-                                    # עדכון equity בהתאם למצב מימון
-                                    if invest_mode == 'סכום קבוע לכל עסקה':
-                                        equity += entry['invest_amount'] + net_pl
-                                    else:
-                                        equity = equity + net_pl
+                                        if invest_mode == 'סכום קבוע לכל עסקה':
+                                            equity += entry['invest_amount'] + net_pl
+                                        else:
+                                            equity = equity + net_pl
 
-                                    trades.append({
-                                        'entry_date': pd.to_datetime(entry['entry_date']),
-                                        'entry_price': entry['entry_price'],
-                                        'entry_RSI': entry.get('entry_RSI', np.nan),
-                                        'entry_ADX': entry.get('entry_ADX', np.nan),
-                                        'entry_SMA': entry.get('entry_SMA', np.nan),
-                                        'exit_date': pd.to_datetime(idx[exec_i]),
-                                        'exit_price': exit_price,
-                                        'exit_RSI': exit_row.get('RSI', np.nan),
-                                        'exit_ADX': exit_row.get('ADX', np.nan),
-                                        'exit_SMA': exit_row.get(f'SMA_{sma_period}', np.nan),
-                                        'quantity': entry['quantity'],
-                                        'gross_PL': gross_pl,
-                                        'entry_commission': entry['entry_commission'],
-                                        'exit_commission': exit_comm,
-                                        'net_PL': net_pl,
-                                        'pnl_pct': (net_pl / (entry['invest_amount'] if entry['invest_amount'] > 0 else 1)) * 100
-                                    })
+                                        trades.append({
+                                            'entry_date': pd.to_datetime(entry['entry_date']),
+                                            'entry_price': entry['entry_price'],
+                                            'entry_RSI': entry.get('entry_RSI', np.nan),
+                                            'entry_ADX': entry.get('entry_ADX', np.nan),
+                                            'entry_SMA': entry.get('entry_SMA', np.nan),
+                                            'exit_date': pd.to_datetime(idx[exec_i]),
+                                            'exit_price': exit_price,
+                                            'exit_RSI': to_scalar(exit_row.get('RSI', np.nan)),
+                                            'exit_ADX': to_scalar(exit_row.get('ADX', np.nan)),
+                                            'exit_SMA': to_scalar(exit_row.get(f'SMA_{sma_period}', np.nan)),
+                                            'quantity': entry['quantity'],
+                                            'gross_PL': gross_pl,
+                                            'entry_commission': entry['entry_commission'],
+                                            'exit_commission': exit_comm,
+                                            'net_PL': net_pl,
+                                            'pnl_pct': (net_pl / (entry['invest_amount'] if entry['invest_amount']>0 else 1)) * 100
+                                        })
 
-                                    in_position = False
-                                    entry = None
+                                        in_position = False
+                                        entry = None
 
                     cumulative_equity.append(equity)
 
-                # אם נשארה פוזיציה פתוחה בתום התקופה — נסגור לפי בחירת המשתמש (או נשאיר פתוחה)
+                # טיפול בפוזיציה פתוחה בתום התקופה
                 if in_position and entry is not None:
                     last_i = n - 1
-                    last_price = float(scan_df.iloc[last_i]['Close'])
-                    if close_open_at_run:
+                    last_price = to_scalar(scan_df.iloc[last_i].get('Close', np.nan))
+                    if (not pd.isna(last_price)) and close_open_at_run:
+                        last_price = float(last_price)
                         gross_pl = (last_price - entry['entry_price']) * entry['quantity']
                         exit_comm = calc_commission(last_price * entry['quantity'], commission_type, commission_value)
                         net_pl = gross_pl - exit_comm
@@ -351,9 +379,9 @@ if submit:
                             'entry_SMA': entry.get('entry_SMA', np.nan),
                             'exit_date': pd.to_datetime(idx[last_i]),
                             'exit_price': last_price,
-                            'exit_RSI': scan_df.iloc[last_i].get('RSI', np.nan),
-                            'exit_ADX': scan_df.iloc[last_i].get('ADX', np.nan),
-                            'exit_SMA': scan_df.iloc[last_i].get(f'SMA_{sma_period}', np.nan),
+                            'exit_RSI': to_scalar(scan_df.iloc[last_i].get('RSI', np.nan)),
+                            'exit_ADX': to_scalar(scan_df.iloc[last_i].get('ADX', np.nan)),
+                            'exit_SMA': to_scalar(scan_df.iloc[last_i].get(f'SMA_{sma_period}', np.nan)),
                             'quantity': entry['quantity'],
                             'gross_PL': gross_pl,
                             'entry_commission': entry['entry_commission'],
@@ -365,7 +393,7 @@ if submit:
                         in_position = False
                         entry = None
 
-                # חישוב Buy & Hold על בסיס initial_capital
+                # חישוב Buy&Hold
                 bh_shares = initial_capital / bh_start_price if (bh_start_price and bh_start_price > 0) else 0.0
                 bh_gross = (bh_end_price - bh_start_price) * bh_shares if (bh_start_price and bh_end_price) else 0.0
                 bh_entry_comm = calc_commission(initial_capital, commission_type, commission_value)
@@ -394,17 +422,15 @@ if submit:
                     'bh_pct': bh_pct
                 }
 
-        # ---------- תצוגת תוצאות ---------- #
+        # ---------- הצגת תוצאות ---------- #
         for ticker, res in results_by_ticker.items():
             st.header(f'תוצאות עבור {ticker}')
             trades_df = res['trades_df']
-
             if trades_df.empty:
                 st.info('לא נרשמו פוזיציות במהלך התקופה.')
             else:
                 st.subheader('טבלת פוזיציות')
                 df_show = trades_df.copy()
-                # פורמט תאריכים להצגה
                 if not df_show.empty:
                     df_show['entry_date'] = pd.to_datetime(df_show['entry_date'])
                     df_show['exit_date'] = pd.to_datetime(df_show['exit_date'])
@@ -459,7 +485,6 @@ if submit:
                     st.download_button(label='הורד דוח PDF', data=pdf_bytes, file_name=f'{ticker}_report.pdf', mime='application/pdf')
 
             else:
-                # altair fallback
                 if ALT_AVAILABLE:
                     base = alt.Chart(price_df).encode(x='Date:T')
                     line = base.mark_line().encode(y='Close:Q', tooltip=['Date:T', 'Close:Q'])
@@ -476,7 +501,6 @@ if submit:
                 if not MATPLOTLIB_AVAILABLE:
                     st.info('matplotlib לא מותקן — הורדות PNG/PDF אינן זמינות. התקן matplotlib כדי לאפשר זאת.')
 
-            # Excel export
             if enable_excel and not trades_df.empty:
                 out = BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
@@ -485,7 +509,6 @@ if submit:
                 out.seek(0)
                 st.download_button(label='הורד דוח Excel (.xlsx)', data=out, file_name=f'{ticker}_backtest.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-            # Buy & Hold comparison
             if ticker in bh_by_ticker:
                 b = bh_by_ticker[ticker]
                 st.subheader('השוואה ל-Buy & Hold')
@@ -499,6 +522,7 @@ if submit:
 st.markdown('''
 **הערות חשובות:**  
 - כל המחירים מבוססים על Adjusted Close (auto_adjust=True ב-yfinance).  
-- החימום של 250 יום משמש רק לחישוב יציב של אינדיקטורים; פוזיציות מדווחות רק בתוך הטווח שבחרת.  
-- נתוני אינטרדיי (1h) מוגבלים ב-Yahoo Finance להיסטוריות קצרות יותר — אם אינך מקבל נתונים שעתי, נסה טווח קצר יותר.
+- החימום של 250 יום משמש לחישוב יציב של אינדיקטורים; פוזיציות מדווחות רק בתוך הטווח שבחרת.  
+- אם יתגלו עוד מקרי גבול (עמודות לא צפויות / מבני נתונים שלמים), נחזק את הפונקציה to_scalar כדי לטפל בהם.
 ''')
+
