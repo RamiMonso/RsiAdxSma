@@ -3,3 +3,6 @@ yfinance
 pandas
 numpy
 matplotlib
+xlsxwriter
+openpyxl
+altair
