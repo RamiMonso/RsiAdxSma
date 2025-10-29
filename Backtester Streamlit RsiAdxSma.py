@@ -1,5 +1,5 @@
 # streamlit_backtester_rsi_adx.py
-# Backtester RSI + ADX + SMA — גרסה מתוקנת: compute_adx חזק ועמיד לצורות נתונים שונות
+# Backtester RSI + ADX + SMA — כולל duration_days ו-win-rate
 # שמור והרץ: streamlit run streamlit_backtester_rsi_adx.py
 
 import streamlit as st
@@ -30,10 +30,6 @@ st.caption('נתוני Adjusted Close מ-Yahoo Finance | חימום אינדיק
 
 # ---------------------- פונקציות עזר ----------------------
 def to_scalar(x):
-    """
-    להבטיח ערך סקלרי מתוך כניסה שעשויה להיות scalar, Series או ndarray.
-    אם לא ניתן לחלץ scalar יחיד — מחזיר np.nan.
-    """
     if isinstance(x, (int, float, np.floating, np.integer)) and not isinstance(x, (np.ndarray, pd.Series)):
         return x
     if x is None:
@@ -82,18 +78,10 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return rsi
 
 def compute_adx(high, low, close, period: int = 14) -> pd.Series:
-    """
-    Robust ADX implementation (Wilder style) that tolerates:
-    - high/low/close passed as DataFrame with single column -> squeezes to Series
-    - avoids creating multi-dimensional numpy arrays
-    - uses pandas ops to keep Series shapes consistent
-    """
-    # Ensure inputs are Series (squeeze single-column DataFrame)
     if isinstance(high, pd.DataFrame):
         if high.shape[1] == 1:
             high = high.iloc[:, 0]
         else:
-            # If DataFrame has multiple columns — try to select first numeric column
             high = high.select_dtypes(include=[np.number]).iloc[:, 0]
     if isinstance(low, pd.DataFrame):
         if low.shape[1] == 1:
@@ -106,34 +94,27 @@ def compute_adx(high, low, close, period: int = 14) -> pd.Series:
         else:
             close = close.select_dtypes(include=[np.number]).iloc[:, 0]
 
-    # Now ensure they are Series
     high = pd.Series(high).astype(float)
     low = pd.Series(low).astype(float)
     close = pd.Series(close).astype(float)
 
     prev_close = close.shift(1)
-
-    # True Range (TR)
     tr1 = high - low
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-    # Directional Movement using pandas ops -> always Series 1D
     up_move = high - high.shift(1)
     down_move = low.shift(1) - low
 
     plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
     minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
 
-    # Wilder smoothing via ewm (alpha = 1/period)
     atr = tr.ewm(alpha=1/period, adjust=False).mean()
     smooth_plus = plus_dm.ewm(alpha=1/period, adjust=False).mean()
     smooth_minus = minus_dm.ewm(alpha=1/period, adjust=False).mean()
 
-    # Avoid division by zero
     atr_safe = atr.replace(0, np.nan)
-
     plus_di = 100 * (smooth_plus / atr_safe)
     minus_di = 100 * (smooth_minus / atr_safe)
 
@@ -142,8 +123,6 @@ def compute_adx(high, low, close, period: int = 14) -> pd.Series:
 
     adx = dx.ewm(alpha=1/period, adjust=False).mean()
     adx = adx.replace([np.inf, -np.inf], np.nan)
-
-    # align index and return Series
     adx.index = close.index
     return adx
 
@@ -371,6 +350,17 @@ if submit:
                                         else:
                                             equity = equity + net_pl
 
+                                        # חישוב משך העסקה בימים (כולל: כניסה+יציאה באותו יום = 1)
+                                        exit_dt = pd.to_datetime(idx[exec_i])
+                                        entry_dt = pd.to_datetime(entry['entry_date'])
+                                        duration_days = (exit_dt.normalize() - entry_dt.normalize()).days + 1
+                                        try:
+                                            duration_days = int(duration_days)
+                                            if duration_days < 1:
+                                                duration_days = 1
+                                        except Exception:
+                                            duration_days = np.nan
+
                                         trades.append({
                                             'entry_date': pd.to_datetime(entry['entry_date']),
                                             'entry_price': entry['entry_price'],
@@ -387,7 +377,8 @@ if submit:
                                             'entry_commission': entry['entry_commission'],
                                             'exit_commission': exit_comm,
                                             'net_PL': net_pl,
-                                            'pnl_pct': (net_pl / (entry['invest_amount'] if entry['invest_amount']>0 else 1)) * 100
+                                            'pnl_pct': (net_pl / (entry['invest_amount'] if entry['invest_amount']>0 else 1)) * 100,
+                                            'duration_days': duration_days
                                         })
 
                                         in_position = False
@@ -409,6 +400,16 @@ if submit:
                         else:
                             equity = equity + net_pl
 
+                        exit_dt = pd.to_datetime(idx[last_i])
+                        entry_dt = pd.to_datetime(entry['entry_date'])
+                        duration_days = (exit_dt.normalize() - entry_dt.normalize()).days + 1
+                        try:
+                            duration_days = int(duration_days)
+                            if duration_days < 1:
+                                duration_days = 1
+                        except Exception:
+                            duration_days = np.nan
+
                         trades.append({
                             'entry_date': pd.to_datetime(entry['entry_date']),
                             'entry_price': entry['entry_price'],
@@ -426,6 +427,7 @@ if submit:
                             'exit_commission': exit_comm,
                             'net_PL': net_pl,
                             'pnl_pct': (net_pl / (entry['invest_amount'] if entry['invest_amount']>0 else 1)) * 100,
+                            'duration_days': duration_days,
                             'note': 'סגירה לפי יום הריצה (פוזיציה פתוחה)'
                         })
                         in_position = False
@@ -473,13 +475,20 @@ if submit:
                 if not df_show.empty:
                     df_show['entry_date'] = pd.to_datetime(df_show['entry_date'])
                     df_show['exit_date'] = pd.to_datetime(df_show['exit_date'])
+                # הצגת טבלה כוללת duration_days
                 st.dataframe(df_show)
 
                 st.markdown('**סיכום ביצועים**')
-                c1, c2, c3 = st.columns(3)
+                # חשב אחוזי ביצוע (win rate)
+                total_trades = len(trades_df)
+                wins = int((trades_df['net_PL'] > 0).sum()) if total_trades>0 else 0
+                win_rate = (wins / total_trades) * 100 if total_trades>0 else 0.0
+
+                c1, c2, c3, c4 = st.columns(4)
                 c1.metric('סה״כ רווח נקי', f"{res['total_net']:.2f}")
                 c2.metric('סה״כ רווח ברוטו', f"{res['total_gross']:.2f}")
                 c3.metric('סה״כ עמלות', f"{res['total_commissions']:.2f}")
+                c4.metric('אחוזי ביצוע', f"{win_rate:.2f}%")
 
             st.subheader('גרף מחיר — כניסות ויציאות')
             price_df = res['price_df'].reset_index().rename(columns={'index': 'Date'})
@@ -560,7 +569,7 @@ if submit:
 
 st.markdown('''
 **הערות חשובות:**  
-- תיקנתי את `compute_adx` כך שיעבוד גם אם high/low/close מגיעים כ-DataFrame או כ-Series מורחב.  
-- ADX מחושב לפי שיטת Wilder (EWM smoothing) — תואם ליישומים סטנדרטיים.  
-- אם תרצה נוכל להוסיף: בדיקות יחידה לחישובי אינדיקטורים, אפשרות לבחור גרסת חישוב (strict Wilder vs ewm-approx), וכן logging דיבאגים שמופיע רק במצב dev.
+- הוספתי `duration_days` לכל עסקה (חישוב כולל: כניסה ויציאה באותו יום = 1).  
+- הוספתי מדד 'אחוזי ביצוע' (Win Rate) בסיכום הביצועים.  
+- כל שאר הפונקציות והלוגיקה נשמרו כפי שהיו.
 ''')
